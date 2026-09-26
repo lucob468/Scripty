@@ -1,0 +1,1928 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+local CS = game:GetService("CollectionService")
+local TweenService = game:GetService("TweenService")
+local LP = Players.LocalPlayer
+
+local CONFIG = {
+	enabled = true,
+	preset = "UNSTOPPABLE",
+	strength = 1,
+	legitMask = 0.45,
+	watchedPause = true,
+	microGain = 0.5,
+	coyote = true,
+	coyoteTime = 0.38,
+	jumpBuffer = true,
+	bufferTime = 0.22,
+	perfectTiming = true,
+	runUp = true,
+	maxRunBoost = 1.22,
+	edgeProbe = 6,
+	jumpCapMult = 1,
+	autoBhop = false,
+	airControl = true,
+	airControlGain = 1,
+	wallhop = true,
+	autoWallhop = true,
+	wallhopGain = 9,
+	wallhopCooldown = 0.3,
+	wallhopRange = 2.4,
+	wallhopVetoS = true,
+	iceGrip = true,
+	conveyorCancel = true,
+	platformStick = true,
+	platformLead = true,
+	trussAssist = true,
+	trussBoost = 1.5,
+	stumbleRecovery = true,
+	lipHop = true,
+	comboGrace = true,
+	comboWindow = 0.4,
+	lethalSave = false,
+	fallGuard = true,
+	hazardSensor = true,
+	sensorRange = 30,
+	windCancel = true,
+	gravityMult = 1,
+	speedMult = 1,
+	autopilot = false,
+	noclip = false,
+	maxFlight = 0.9,
+	hud = true,
+	persist = true,
+	guiKey = "RightShift",
+	quickKey = "RightControl",
+	powerKey = "LeftControl",
+	autoEdgeHop = true,
+	hopDebounce = 0.18,
+	planAim = true,
+	aimGain = 0.45,
+	aimHold = 0.6,
+	wallhopTargetNext = true,
+	wallhopTopAim = true,
+	wallhopHeights = 9,
+	hazardSidestep = true,
+	sidestepRange = 6,
+	sidestepPower = 7,
+	sidestepCooldown = 0.5,
+	hazardTiming = true,
+}
+
+local PRESETS = {
+	UNSTOPPABLE = {strength=1, legitMask=0.45, microGain=0.5, coyote=true, coyoteTime=0.38, jumpBuffer=true, bufferTime=0.22, perfectTiming=true, runUp=true, maxRunBoost=1.22, edgeProbe=6, autoBhop=false, airControl=true, airControlGain=1, wallhop=true, autoWallhop=true, wallhopGain=9, wallhopCooldown=0.3, wallhopRange=2.4, wallhopVetoS=true, iceGrip=true, conveyorCancel=true, platformStick=true, platformLead=true, trussAssist=true, trussBoost=1.5, stumbleRecovery=true, lipHop=true, autoEdgeHop=true, planAim=true, aimGain=0.55, aimHold=0.65, hopDebounce=0.16, wallhopTargetNext=true, wallhopTopAim=true, wallhopHeights=12, hazardSidestep=true, sidestepRange=7, sidestepPower=8, comboGrace=true, comboWindow=0.4, lethalSave=false, fallGuard=true, hazardSensor=true, windCancel=true, gravityMult=1, speedMult=1, autopilot=false, noclip=false},
+	ALMOST_HUMAN = {strength=0.85, legitMask=0.85, microGain=0.32, coyote=true, coyoteTime=0.28, jumpBuffer=true, bufferTime=0.18, perfectTiming=true, runUp=true, maxRunBoost=1.1, edgeProbe=5, autoBhop=false, airControl=true, airControlGain=0.8, wallhop=true, autoWallhop=true, wallhopGain=7, wallhopCooldown=0.32, wallhopRange=2.2, wallhopVetoS=true, iceGrip=true, conveyorCancel=true, platformStick=true, platformLead=true, trussAssist=true, trussBoost=1.3, stumbleRecovery=true, lipHop=true, autoEdgeHop=true, planAim=true, aimGain=0.4, aimHold=0.5, hopDebounce=0.22, wallhopTargetNext=true, wallhopTopAim=true, wallhopHeights=9, hazardSidestep=true, sidestepRange=6, sidestepPower=6.5, comboGrace=true, comboWindow=0.3, lethalSave=false, fallGuard=true, hazardSensor=false, windCancel=true, gravityMult=1, speedMult=1, autopilot=false, noclip=false},
+	SUBTLE = {strength=0.6, legitMask=1, microGain=0.18, coyote=true, coyoteTime=0.22, jumpBuffer=true, bufferTime=0.15, perfectTiming=true, runUp=false, maxRunBoost=1.05, edgeProbe=4, autoBhop=false, airControl=true, airControlGain=0.6, wallhop=false, autoWallhop=false, wallhopGain=6, wallhopCooldown=0.34, wallhopRange=2, wallhopVetoS=true, iceGrip=true, conveyorCancel=true, platformStick=true, platformLead=true, trussAssist=true, trussBoost=1.2, stumbleRecovery=true, lipHop=false, autoEdgeHop=false, planAim=true, aimGain=0.25, aimHold=0.4, hopDebounce=0.3, wallhopTargetNext=false, wallhopTopAim=false, wallhopHeights=6, hazardSidestep=false, sidestepRange=5, sidestepPower=5, comboGrace=true, comboWindow=0.25, lethalSave=false, fallGuard=true, hazardSensor=false, windCancel=true, gravityMult=1, speedMult=1, autopilot=false, noclip=false},
+	SPEEDRUNNER = {strength=0.95, legitMask=0.55, microGain=0.45, coyote=true, coyoteTime=0.34, jumpBuffer=true, bufferTime=0.22, perfectTiming=true, runUp=true, maxRunBoost=1.3, edgeProbe=6, autoBhop=false, airControl=true, airControlGain=1.1, wallhop=true, autoWallhop=true, wallhopGain=11, wallhopCooldown=0.22, wallhopRange=2.6, wallhopVetoS=true, iceGrip=true, conveyorCancel=true, platformStick=true, platformLead=true, trussAssist=true, trussBoost=2, stumbleRecovery=true, lipHop=true, autoEdgeHop=true, planAim=true, aimGain=0.5, aimHold=0.6, hopDebounce=0.12, wallhopTargetNext=true, wallhopTopAim=true, wallhopHeights=12, hazardSidestep=true, sidestepRange=7, sidestepPower=7, autoBhop=true, comboGrace=true, comboWindow=0.4, lethalSave=false, fallGuard=true, hazardSensor=true, windCancel=true, gravityMult=1, speedMult=1.08, autopilot=false, noclip=false},
+	GHOST = {strength=1, legitMask=0.1, microGain=0.9, coyote=true, coyoteTime=0.45, jumpBuffer=true, bufferTime=0.3, perfectTiming=true, runUp=true, maxRunBoost=1.5, edgeProbe=8, autoBhop=false, airControl=true, airControlGain=1.8, wallhop=true, autoWallhop=true, wallhopGain=14, wallhopCooldown=0.18, wallhopRange=3, wallhopVetoS=true, iceGrip=true, conveyorCancel=true, platformStick=true, platformLead=true, trussAssist=true, trussBoost=2.5, stumbleRecovery=true, lipHop=true, autoEdgeHop=true, planAim=true, aimGain=0.7, aimHold=0.8, hopDebounce=0.1, wallhopTargetNext=true, wallhopTopAim=true, wallhopHeights=14, hazardSidestep=true, sidestepRange=9, sidestepPower=9, comboGrace=true, comboWindow=0.8, lethalSave=true, fallGuard=true, hazardSensor=true, windCancel=true, gravityMult=0.85, speedMult=1.15, autopilot=true, noclip=true},
+}
+
+local TOGGLES = {
+	{key="coyote", group="JUMP", name="Coyote Window"},
+	{key="jumpBuffer", group="JUMP", name="Jump Buffering"},
+	{key="perfectTiming", group="JUMP", name="Perfect Edge Timing"},
+	{key="runUp", group="JUMP", name="Run Up Boost On Long Gaps"},
+	{key="autoEdgeHop", group="JUMP", name="Auto Edge Hop (does the jump)"},
+	{key="airControl", group="AIR", name="Air Control"},
+	{key="planAim", group="AIR", name="In Flight Landing Aim"},
+	{key="wallhop", group="AIR", name="Wallhop Assist"},
+	{key="autoWallhop", group="AIR", name="Auto Wallhop On Contact"},
+	{key="wallhopTargetNext", group="AIR", name="Wallhop Aims At Opposite Wall"},
+	{key="wallhopTopAim", group="AIR", name="Wallhop Climbs Onto Ledges"},
+	{key="iceGrip", group="GROUND", name="Ice And Slip Grip"},
+	{key="conveyorCancel", group="GROUND", name="Conveyor Cancel"},
+	{key="platformStick", group="GROUND", name="Platform Stick When Idle"},
+	{key="platformLead", group="GROUND", name="Platform Lead Prediction"},
+	{key="trussAssist", group="GROUND", name="Truss Climb Assist"},
+	{key="stumbleRecovery", group="GROUND", name="Stumble Recovery"},
+	{key="lipHop", group="GROUND", name="Lip Hop (auto jump over lips)"},
+	{key="comboGrace", group="SAFETY", name="Combo Damage Grace"},
+	{key="lethalSave", group="SAFETY", name="Lethal Save (visible)"},
+	{key="fallGuard", group="SAFETY", name="Fall Damage Guard"},
+	{key="hazardSidestep", group="SAFETY", name="Hazard Sidestep (grounded)"},
+	{key="hazardSensor", group="INFO", name="Hazard Sensor Highlights"},
+	{key="hazardTiming", group="INFO", name="Hazard Impact Timer HUD"},
+	{key="windCancel", group="INFO", name="Wind Cancel"},
+	{key="hud", group="INFO", name="Show HUD"},
+	{key="autoBhop", group="ADVANCED", name="Bunny Hop (visible)"},
+	{key="autopilot", group="ADVANCED", name="Autopilot (visible)"},
+	{key="noclip", group="ADVANCED", name="Ghost Noclip (visible)"},
+}
+
+local SLIDERS = {
+	{key="maxRunBoost", min=1.05, max=1.5, step=0.01, label="Max Run Up Boost", group="TIMING"},
+	{key="edgeProbe", min=3, max=9, step=0.5, label="Edge Probe Distance", group="TIMING"},
+	{key="coyoteTime", min=0, max=0.6, step=0.02, label="Coyote Window", group="TIMING"},
+	{key="bufferTime", min=0, max=0.5, step=0.02, label="Jump Buffer Time", group="TIMING"},
+	{key="jumpCapMult", min=1, max=1.15, step=0.01, label="Jump Power Ceiling", group="TIMING"},
+	{key="maxFlight", min=0.4, max=1.2, step=0.05, label="Jump Solver Time Cap", group="TIMING"},
+	{key="aimGain", min=0.1, max=1, step=0.05, label="Landing Aim Strength", group="TIMING"},
+	{key="aimHold", min=0.2, max=1.2, step=0.05, label="Landing Aim Window", group="TIMING"},
+	{key="hopDebounce", min=0.05, max=0.5, step=0.01, label="Auto Hop Reaction Delay", group="TIMING"},
+	{key="wallhopGain", min=4, max=16, step=0.5, label="Wallhop Push Off", group="WALLHOP"},
+	{key="wallhopCooldown", min=0.15, max=0.8, step=0.01, label="Wallhop Cooldown", group="WALLHOP"},
+	{key="wallhopRange", min=1.6, max=3.5, step=0.1, label="Wall Detector Range", group="WALLHOP"},
+	{key="wallhopHeights", min=4, max=14, step=1, label="Ledge Search Height", group="WALLHOP"},
+	{key="sidestepRange", min=3, max=12, step=1, label="Hazard Sidestep Range", group="SAFETY"},
+	{key="sidestepPower", min=3, max=14, step=0.5, label="Hazard Sidestep Power", group="SAFETY"},
+	{key="sidestepCooldown", min=0.2, max=1.2, step=0.05, label="Hazard Sidestep Cooldown", group="SAFETY"},
+	{key="airControlGain", min=0.5, max=2.5, step=0.05, label="Air Control Gain", group="TUNING"},
+	{key="microGain", min=0, max=1, step=0.05, label="Micro Correction Gain", group="TUNING"},
+	{key="trussBoost", min=1, max=2.5, step=0.1, label="Truss Climb Speed", group="TUNING"},
+	{key="comboWindow", min=0.2, max=1, step=0.05, label="Combo Grace Window", group="SAFETY"},
+	{key="speedMult", min=1, max=1.4, step=0.02, label="Speed Multiplier (visible)", group="ADVANCED"},
+	{key="gravityMult", min=0.4, max=1.2, step=0.05, label="Gravity Multiplier (visible)", group="ADVANCED"},
+	{key="sensorRange", min=12, max=60, step=2, label="Sensor Range", group="ADVANCED"},
+	{key="legitMask", min=0, max=1, step=0.05, label="Legit Look Smoothing", group="STEALTH"},
+	{key="strength", min=0.3, max=1, step=0.05, label="Assistance Strength", group="STEALTH"},
+}
+
+local function normalizeSpecs()
+	local i
+	for i = #TOGGLES, 1, -1 do
+		local entry = TOGGLES[i]
+		if type(entry) ~= "table" then
+			table.remove(TOGGLES, i)
+		else
+			if type(entry.key) ~= "string" or entry.key == "" then
+				entry.key = "option" .. i
+			end
+			if type(entry.name) ~= "string" then
+				entry.name = entry.key
+			end
+			if type(entry.group) ~= "string" then
+				entry.group = "MISC"
+			end
+			if CONFIG[entry.key] == nil then
+				CONFIG[entry.key] = false
+			end
+		end
+	end
+	for i = #SLIDERS, 1, -1 do
+		local entry = SLIDERS[i]
+		if type(entry) ~= "table" then
+			table.remove(SLIDERS, i)
+		else
+			if type(entry.key) ~= "string" or entry.key == "" then
+				entry.key = "value" .. i
+			end
+			if type(entry.min) ~= "number" then
+				entry.min = 0
+			end
+			if type(entry.max) ~= "number" or entry.max <= entry.min then
+				entry.max = entry.min + 1
+			end
+			if type(entry.step) ~= "number" or entry.step <= 0 then
+				entry.step = 0.05
+			end
+			if type(entry.label) ~= "string" then
+				entry.label = entry.key
+			end
+			if type(entry.group) ~= "string" then
+				entry.group = "TUNING"
+			end
+			if type(CONFIG[entry.key]) ~= "number" then
+				CONFIG[entry.key] = entry.min
+			end
+		end
+	end
+end
+
+normalizeSpecs()
+
+local Theme = {
+	bg = Color3.fromRGB(12, 13, 16),
+	panel = Color3.fromRGB(18, 20, 24),
+	row = Color3.fromRGB(24, 26, 32),
+	rowAlt = Color3.fromRGB(28, 31, 38),
+	accent = Color3.fromRGB(94, 214, 255),
+	good = Color3.fromRGB(104, 226, 154),
+	bad = Color3.fromRGB(226, 104, 104),
+	warn = Color3.fromRGB(240, 196, 90),
+	text = Color3.fromRGB(232, 236, 244),
+	dim = Color3.fromRGB(140, 148, 164),
+	track = Color3.fromRGB(44, 48, 58),
+}
+
+local Stats = {jumps=0, grips=0, timing=0, wallhops=0, graces=0, hops=0, lipHops=0, aims=0, dodges=0, plats=0, frames=0}
+local Hazard = {map = setmetatable({}, {__mode = "k"}), list = {}, refresh = 0}
+local Sensor = {hls = {}, at = 0, count = 0}
+local Ctl = {
+	grounded = false, groundedAt = 0, leftAt = 0, jumpAt = -99, buffered = 0,
+	lastSpeed = 0, watched = false, clipState = nil, plan = nil, planUntil = 0,
+	wallReady = false, wallCd = 0, hopCd = 0, sensorAt = 0, conveyorCd = 0,
+	stuckAt = 0, lastPos = nil, lastJumpT = 0, touchLock = nil, lastHud = 0,
+	topCd = 0, gripCd = 0, graceCd = 0,
+	aimTarget = nil, aimPart = nil, aimSet = 0, aimUntil = 0,
+	sidestepCd = 0, hazardDist = 0, hazardEta = 0, blockedAt = 0, flash = "", flashAt = 0,
+}
+
+local function ensureDefaults(target, defaults)
+	for key, value in pairs(defaults) do
+		if target[key] == nil then
+			target[key] = value
+		end
+	end
+	for key, value in pairs(target) do
+		if value == nil then
+			target[key] = defaults[key]
+		end
+	end
+end
+
+ensureDefaults(CONFIG, {
+	enabled = true, strength = 1, legitMask = 0.45, microGain = 0.5, coyote = true, coyoteTime = 0.38,
+	jumpBuffer = true, bufferTime = 0.22, perfectTiming = true, runUp = true, maxRunBoost = 1.22,
+	edgeProbe = 6, jumpCapMult = 1, autoBhop = false, airControl = true, airControlGain = 1,
+	planAim = true, wallhop = true, autoWallhop = true, wallhopGain = 9, wallhopCooldown = 0.3,
+	wallhopRange = 2.4, wallhopVetoS = true, wallhopTargetNext = true, wallhopTopAim = true, wallhopHeights = 9,
+	iceGrip = true, conveyorCancel = true, platformStick = true, platformLead = true, trussAssist = true,
+	trussBoost = 1.5, stumbleRecovery = true, lipHop = true, autoEdgeHop = true, hopDebounce = 0.18,
+	aimGain = 0.45, aimHold = 0.6, comboGrace = true, comboWindow = 0.4, lethalSave = false,
+	fallGuard = true, hazardSensor = true, hazardTiming = true, hazardSidestep = true, sidestepRange = 6,
+	sidestepPower = 7, sidestepCooldown = 0.5, sensorRange = 30, windCancel = true, gravityMult = 1,
+	speedMult = 1, autopilot = false, noclip = false, maxFlight = 0.9, hud = true, persist = true,
+})
+
+ensureDefaults(Ctl, {
+	grounded = false, groundedAt = 0, leftAt = 0, jumpAt = -99, buffered = 0, lastSpeed = 0,
+	watched = false, planUntil = 0, wallReady = false, wallCd = 0, hopCd = 0, sensorAt = 0,
+	conveyorCd = 0, stuckAt = 0, lastJumpT = 0, lastHud = 0, topCd = 0, gripCd = 0, graceCd = 0,
+	aimSet = 0, aimUntil = 0, sidestepCd = 0, hazardDist = 0, hazardEta = 0, blockedAt = 0,
+	flash = "", flashAt = 0, clipState = nil, plan = nil, aimTarget = nil, aimPart = nil, touchLock = nil,
+})
+
+ensureDefaults(Stats, {jumps = 0, grips = 0, timing = 0, wallhops = 0, graces = 0, hops = 0, lipHops = 0, aims = 0, dodges = 0, plats = 0, frames = 0})
+ensureDefaults(Sensor, {hls = {}, at = 0, count = 0})
+ensureDefaults(Hazard, {list = {}, refresh = 0})
+
+local function clamp(v, a, b)
+	a = tonumber(a) or 0
+	b = tonumber(b) or 1
+	if b <= a then
+		b = a + 1
+	end
+	v = tonumber(v)
+	if v == nil then
+		return a
+	end
+	if v < a then
+		return a
+	elseif v > b then
+		return b
+	end
+	return v
+end
+
+local function lerp(a, b, t)
+	return a + (b - a) * t
+end
+
+local function flat(v)
+	return Vector3.new(v.X, 0, v.Z)
+end
+
+local function rayParams()
+	local p = RaycastParams.new()
+	p.FilterType = Enum.RaycastFilterType.Exclude
+	p.FilterDescendantsInstances = char and {char} or {}
+	p.IgnoreWater = false
+	return p
+end
+
+local function cast(origin, dir)
+	return Workspace:Raycast(origin, dir, rayParams())
+end
+
+local function floorProbe(position)
+	local origin = position + Vector3.new(0, 2.5, 0)
+	local hit = cast(origin, Vector3.new(0, -7, 0))
+	if hit and hit.Normal.Y > 0.35 then return hit end
+	return nil
+end
+
+local function isHazard(part)
+	if not part then return false end
+	local cached = Hazard.map[part]
+	if cached ~= nil then
+		return cached
+	end
+	if CS:HasTag(part, "Safe") then
+		Hazard.map[part] = false
+		return false
+	end
+	local flag = false
+	local name = string.lower(part.Name)
+	local words = {"kill", "spike", "lava", "hurt", "damage", "death", "saw", "trap", "acid", "fire", "laser", "lazer", "void", "poison", "zap", "instakill", "deadly"}
+	for i = 1, #words do
+		if string.find(name, words[i], 1, true) then
+			flag = true
+			break
+		end
+	end
+	if not flag then
+		local tags = {"Kill", "Damage", "Hazard", "Lava", "Spike", "Trap", "Deadly", "KillBrick"}
+		for i = 1, #tags do
+			if CS:HasTag(part, tags[i]) then
+				flag = true
+				break
+			end
+		end
+	end
+	if not flag and part:GetAttribute("Damage") then
+		flag = true
+	end
+	Hazard.map[part] = flag
+	return flag
+end
+
+local function hazardNear(position, radius)
+	local parts = Workspace:GetPartBoundsInRadius(position, radius)
+	for i = 1, #parts do
+		if isHazard(parts[i]) then return true end
+	end
+	return false
+end
+
+local function refreshHazards()
+	if T < Hazard.refresh then return end
+	Hazard.refresh = T + 1.5
+	Hazard.list = {}
+	if not root then return end
+	local parts = Workspace:GetPartBoundsInRadius(root.Position, 90)
+	for i = 1, #parts do
+		local part = parts[i]
+		if isHazard(part) then table.insert(Hazard.list, part) end
+	end
+end
+
+local function charParts()
+	local list = {}
+	if not char then return list end
+	for _, part in ipairs(char:GetDescendants()) do
+		if part:IsA("BasePart") then table.insert(list, part) end
+	end
+	return list
+end
+
+local function applyClip(state)
+	if Ctl.clipState == state then return end
+	Ctl.clipState = state
+	for _, part in ipairs(charParts()) do
+		pcall(function() part.CanCollide = not state end)
+	end
+end
+
+local function shield(duration)
+	Ctl.touchLock = math.max(Ctl.touchLock or 0, T + duration)
+	for _, part in ipairs(charParts()) do
+		pcall(function() part.CanTouch = false end)
+	end
+end
+
+local function unshield()
+	Ctl.touchLock = nil
+	for _, part in ipairs(charParts()) do
+		pcall(function() part.CanTouch = true end)
+	end
+end
+
+local function wantsJump()
+	return Ctl.jumpAt > T - 0.001
+end
+
+local function inputDir()
+	local cam = Workspace.CurrentCamera
+	if not cam then return Vector3.new() end
+	local look = flat(cam.CFrame.LookVector)
+	local right = flat(cam.CFrame.RightVector)
+	if look.Magnitude < 0.01 then look = Vector3.new(0, 0, -1) else look = look.Unit end
+	if right.Magnitude < 0.01 then right = Vector3.new(1, 0, 0) else right = right.Unit end
+	local dir = Vector3.new()
+	if UIS:IsKeyDown(Enum.KeyCode.W) then dir = dir + look end
+	if UIS:IsKeyDown(Enum.KeyCode.S) then dir = dir - look end
+	if UIS:IsKeyDown(Enum.KeyCode.D) then dir = dir + right end
+	if UIS:IsKeyDown(Enum.KeyCode.A) then dir = dir - right end
+	if UIS:IsKeyDown(Enum.KeyCode.Up) then dir = dir + look end
+	if UIS:IsKeyDown(Enum.KeyCode.Down) then dir = dir - look end
+	if dir.Magnitude < 0.05 then return Vector3.new() end
+	return dir.Unit
+end
+
+local function walkSpeed()
+	return hum and hum.WalkSpeed or 16
+end
+
+local function jumpVelocity()
+	if not hum then return 50 end
+	local g = Workspace.Gravity * CONFIG.gravityMult
+	local base = hum.UseJumpPower and hum.JumpPower or math.sqrt(math.max(2 * g * hum.JumpHeight, 1))
+	if not base or base <= 0 then base = 50 end
+	return base * CONFIG.jumpCapMult
+end
+
+local function landingSearch(dirHorizontal, maxDistance)
+	if not root or dirHorizontal.Magnitude < 0.1 then return nil end
+	local best = nil
+	local step = 2.5
+	local origin = root.Position
+	local heading = dirHorizontal.Unit
+	local dist = 3
+	while dist <= maxDistance do
+		local probe = origin + heading * dist
+		local hit = cast(probe + Vector3.new(0, 7, 0), Vector3.new(0, -70, 0))
+		if hit and hit.Normal.Y > 0.5 and not isHazard(hit.Instance) then
+			local top = hit.Position
+			if top.Y < origin.Y + jumpVelocity() * 0.75 and top.Y > origin.Y - 60 then
+				local solidCount = 0
+				local offsets = {Vector3.new(1.6, 0, 0), Vector3.new(-1.6, 0, 0), Vector3.new(0, 0, 1.6), Vector3.new(0, 0, -1.6)}
+				for i = 1, 4 do
+					local check = cast(top + offsets[i] + Vector3.new(0, 5, 0), Vector3.new(0, -12, 0))
+					if check and not isHazard(check.Instance) then solidCount = solidCount + 1 end
+				end
+				if solidCount >= 3 then
+					if not best or dist < best.dist then
+						best = {pos = top, part = hit.Instance, dist = dist, solid = solidCount}
+					end
+				end
+			end
+		end
+		dist = dist + step
+	end
+	return best
+end
+
+local function micro(delta)
+	if not root or delta.Magnitude < 0.01 then return end
+	local scale = CONFIG.microGain * CONFIG.strength
+	if Ctl.watched and CONFIG.watchedPause then scale = scale * (1 - CONFIG.legitMask * 0.5) end
+	root.AssemblyLinearVelocity = root.AssemblyLinearVelocity + delta * scale
+end
+
+
+
+local function sensorStep()
+	if not CONFIG.hazardSensor then
+		if Sensor.count > 0 then
+			for part, mark in pairs(Sensor.hls) do
+				pcall(function() mark:Destroy() end)
+			end
+			Sensor.hls = {}
+			Sensor.count = 0
+		end
+		return
+	end
+	if not root then return end
+	refreshHazards()
+	local keep = {}
+	local count = 0
+	for i = 1, #Hazard.list do
+		local part = Hazard.list[i]
+		if part.Parent and (part.Position - root.Position).Magnitude <= CONFIG.sensorRange then
+			keep[part] = true
+			count = count + 1
+			local mark = Sensor.hls[part]
+			if not mark or not mark.Parent then
+				mark = Instance.new("Highlight")
+				mark.Name = "OA_Sensor"
+				mark.Adornee = part
+				mark.FillColor = Color3.fromRGB(255, 96, 96)
+				mark.FillTransparency = 0.92
+				mark.OutlineColor = Color3.fromRGB(255, 76, 76)
+				mark.OutlineTransparency = 0.3
+				mark.DepthMode = Enum.HighlightDepthMode.Occluded
+				mark.Parent = Workspace
+				Sensor.hls[part] = mark
+			end
+		end
+	end
+	for part, mark in pairs(Sensor.hls) do
+		if not keep[part] or not part.Parent then
+			pcall(function() mark:Destroy() end)
+			Sensor.hls[part] = nil
+		end
+	end
+	Sensor.count = count
+end
+
+local function lipHop()
+	if not CONFIG.lipHop or not Ctl.grounded or T < Ctl.hopCd then
+		return
+	end
+	local dir = flat(root.AssemblyLinearVelocity)
+	if dir.Magnitude < 1.5 then
+		dir = inputDir()
+	end
+	if dir.Magnitude < 0.1 then
+		return
+	end
+	local ahead = dir.Unit * 1.5
+	local shin = cast(root.Position + Vector3.new(0, 0.3, 0), ahead)
+	if not shin then
+		return
+	end
+	if cast(root.Position + Vector3.new(0, 2.2, 0), ahead) then
+		return
+	end
+	local top = cast(root.Position + ahead + Vector3.new(0, 3.5, 0), Vector3.new(0, -6, 0))
+	if not top or top.Normal.Y < 0.4 or isHazard(top.Instance) then
+		return
+	end
+	local lip = top.Position.Y - root.Position.Y
+	if lip < 0.3 or lip > 1.8 then
+		return
+	end
+	Ctl.hopCd = T + 0.35
+	pcall(function()
+		hum.Jump = true
+		hum:ChangeState(Enum.HumanoidStateType.Jumping)
+	end)
+	Stats.lipHops = Stats.lipHops + 1
+end
+
+local WALL_DIRS = {
+	Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0), Vector3.new(0, 0, 1), Vector3.new(0, 0, -1),
+	Vector3.new(0.707, 0, 0.707), Vector3.new(-0.707, 0, 0.707), Vector3.new(0.707, 0, -0.707), Vector3.new(-0.707, 0, -0.707)
+}
+
+local function wallStep()
+	Ctl.wallReady = false
+	if not CONFIG.wallhop or Ctl.grounded then return end
+	local origin = root.Position
+	local best, bestDist = nil, math.huge
+	for i = 1, #WALL_DIRS do
+		local hit = cast(origin, WALL_DIRS[i] * CONFIG.wallhopRange)
+		if hit and math.abs(hit.Normal.Y) < 0.35 and hit.Distance < bestDist and not isHazard(hit.Instance) then
+			bestDist = hit.Distance
+			best = hit
+		end
+	end
+	if not best then return end
+	Ctl.wallReady = true
+	if not CONFIG.wallhop or T < Ctl.wallCd then return end
+	local velocity = root.AssemblyLinearVelocity
+	local dir = inputDir()
+	local moving = dir.Magnitude > 0.05
+	local manual = wantsJump()
+	local automatic = false
+	if CONFIG.autoWallhop and moving then
+		local intoWall = dir:Dot(flat(best.Normal)) < -0.15
+		automatic = intoWall and velocity.Y < 8
+		if CONFIG.wallhopVetoS and UIS:IsKeyDown(Enum.KeyCode.S) and not manual then
+			automatic = false
+		end
+	end
+	if not manual and not automatic then return end
+	if not moving then
+		dir = flat(velocity)
+		if dir.Magnitude < 0.5 then
+			local cam = Workspace.CurrentCamera
+			dir = cam and flat(cam.CFrame.LookVector) or Vector3.new(0, 0, -1)
+		end
+	end
+	local normal = flat(best.Normal)
+	if normal.Magnitude < 0.05 then
+		normal = Vector3.new(0, 0, -1)
+	end
+	normal = normal.Unit
+	local upward = math.min(jumpVelocity() * 0.95, 54)
+	local outDir = -normal
+	if CONFIG.wallhopTopAim and T > Ctl.topCd then
+		local ledge = nil
+		local height = 4
+		while height <= CONFIG.wallhopHeights do
+			local reach = 2
+			while reach <= 5.5 do
+				local origin = best.Position + outDir * (-reach) + Vector3.new(0, height, 0)
+				local hit = cast(origin + Vector3.new(0, 2, 0), Vector3.new(0, -9, 0))
+				if hit and hit.Normal.Y > 0.5 and not isHazard(hit.Instance) and hit.Position.Y > root.Position.Y + 2 then
+					if not ledge or hit.Position.Y < ledge.pos.Y then
+						ledge = {pos = hit.Position, part = hit.Instance}
+					end
+				end
+				reach = reach + 1.5
+			end
+			height = height + 2.5
+		end
+		if ledge then
+			local delta = ledge.pos - root.Position
+			local dH = math.sqrt(delta.X * delta.X + delta.Z * delta.Z)
+			local g = Workspace.Gravity * CONFIG.gravityMult
+			local t = clamp(dH / math.max(walkSpeed(), 8), 0.25, CONFIG.maxFlight)
+			local vy = (delta.Y + 0.5 * g * t * t) / t
+			if vy > 4 and vy <= jumpVelocity() * 1.02 then
+				local dirH = flat(delta)
+				if dirH.Magnitude < 0.1 then
+					dirH = outDir
+				end
+				root.AssemblyLinearVelocity = dirH.Unit * (dH / t) + Vector3.new(0, vy, 0)
+				Ctl.aimTarget = ledge.pos
+				Ctl.aimPart = ledge.part
+				Ctl.aimSet = T
+				Ctl.aimUntil = T + clamp(t + 0.15, 0.3, CONFIG.aimHold)
+				Ctl.wallCd = T + CONFIG.wallhopCooldown
+				Ctl.topCd = T + 0.8
+				Ctl.jumpAt = -99
+				Stats.wallhops = Stats.wallhops + 1
+				pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+				return
+			end
+		end
+	end
+	local push = walkSpeed() * CONFIG.speedMult * 0.7 + 3
+	local tangent = dir - normal * dir:Dot(normal)
+	if tangent.Magnitude < 0.1 then
+		tangent = outDir
+	end
+	if tangent.Magnitude < 0.1 then
+		tangent = Vector3.new(-normal.Z, 0, normal.X)
+	end
+	tangent = tangent.Unit
+	if CONFIG.wallhopTargetNext then
+		local opposite = cast(root.Position, outDir * (CONFIG.wallhopRange * 3.2))
+		if opposite and math.abs(opposite.Normal.Y) < 0.35 and not isHazard(opposite.Instance) then
+			local span = opposite.Distance + 1.5
+			local spanTime = (2 * upward) / math.max(Workspace.Gravity * CONFIG.gravityMult, 1)
+			local need = span / math.max(spanTime, 0.25)
+			local cap = walkSpeed() * CONFIG.maxRunBoost * 1.4
+			if need <= cap then
+				tangent = outDir
+				push = math.max(push, math.min(need, cap))
+			end
+		end
+	end
+	root.AssemblyLinearVelocity = tangent * push + normal * CONFIG.wallhopGain + Vector3.new(0, upward, 0)
+	Ctl.wallCd = T + CONFIG.wallhopCooldown
+	Ctl.jumpAt = -99
+	Stats.wallhops = Stats.wallhops + 1
+	pcall(function() hum:ChangeState(Enum.HumanoidStateType.Jumping) end)
+end
+
+local function landingCone(dir, spread, step, maxDistance)
+	if not root or dir.Magnitude < 0.05 then return nil end
+	local base = dir.Unit
+	local best, bestScore = nil, -math.huge
+	local angle = -spread
+	while angle <= spread + 0.001 do
+		local rad = math.rad(angle)
+		local c, s = math.cos(rad), math.sin(rad)
+		local probe = Vector3.new(base.X * c - base.Z * s, 0, base.X * s + base.Z * c).Unit
+		local landing = landingSearch(probe, maxDistance)
+		if landing and landing.dist > 2 then
+			local score = landing.solid * 9 - landing.dist * 0.3 - math.abs(angle) * 0.55
+			if score > bestScore then
+				bestScore = score
+				landing.dir = probe
+				best = landing
+			end
+		end
+		angle = angle + step
+	end
+	return best
+end
+
+local function planJump()
+	if not (CONFIG.perfectTiming or CONFIG.runUp) or not Ctl.grounded then return nil end
+	local dir = inputDir()
+	if dir.Magnitude < 0.1 then
+		dir = flat(root.AssemblyLinearVelocity)
+		if dir.Magnitude < 0.5 then return nil end
+	end
+	dir = dir.Unit
+	local edge = nil
+	local probe = 1
+	while probe <= CONFIG.edgeProbe do
+		if not floorProbe(root.Position + dir * probe) then
+			edge = probe
+			break
+		end
+		probe = probe + 0.5
+	end
+	if not edge then return nil end
+	local landing = landingSearch(dir, math.max(walkSpeed() * CONFIG.maxFlight * 2, 26))
+	if not landing then
+		landing = landingCone(dir, 30, 10, math.max(walkSpeed() * CONFIG.maxFlight * 2.2, 30))
+	end
+	if not landing then return nil end
+	local gap = landing.dist - edge
+	if gap < 1.5 then return nil end
+	local available = math.max(flat(root.AssemblyLinearVelocity).Magnitude, walkSpeed() * 0.9)
+	local g = Workspace.Gravity * CONFIG.gravityMult
+	local t = clamp(math.sqrt(math.max(2 * math.max(landing.pos.Y - root.Position.Y, 2), 0) / g), 0.3, CONFIG.maxFlight)
+	local needed = gap / math.max(t, 0.25)
+	if needed <= available * 1.02 then return nil end
+	local cap = walkSpeed() * CONFIG.maxRunBoost
+	if needed > cap * 1.35 then
+		Ctl.blockedAt = T + 1.5
+		return nil
+	end
+	if needed > cap then
+		if not CONFIG.runUp then return nil end
+		needed = cap
+	end
+	return {dir = landing.dir or dir, landing = landing, edge = edge, needed = needed}
+end
+
+local function aimStep(dt)
+	if not CONFIG.planAim then
+		return
+	end
+	if not Ctl.aimTarget or T > Ctl.aimUntil or Ctl.grounded then
+		if Ctl.grounded then
+			Ctl.aimTarget = nil
+			Ctl.aimPart = nil
+		end
+		return
+	end
+	local vel = root.AssemblyLinearVelocity
+	local g = Workspace.Gravity * CONFIG.gravityMult
+	local target = Ctl.aimTarget
+	if Ctl.aimPart and not Ctl.aimPart.Anchored then
+		target = target + flat(Ctl.aimPart.AssemblyLinearVelocity) * math.max(T - Ctl.aimSet, 0)
+	end
+	local dy = math.max(root.Position.Y - target.Y, 0)
+	local t = (vel.Y + math.sqrt(vel.Y * vel.Y + 2 * g * dy)) / math.max(g, 1)
+	t = clamp(t, 0.1, 1.2)
+	local predicted = root.Position + Vector3.new(vel.X * t, vel.Y * t - 0.5 * g * t * t, vel.Z * t)
+	local miss = flat(target - predicted)
+	if miss.Magnitude < 0.7 then
+		return
+	end
+	local want = miss / t
+	local delta = want - flat(vel)
+	local limit = 60 * CONFIG.aimGain * dt
+	if delta.Magnitude > limit then
+		delta = delta.Unit * limit
+	end
+	root.AssemblyLinearVelocity = Vector3.new(vel.X + delta.X, vel.Y, vel.Z + delta.Z)
+	Stats.aims = Stats.aims + 1
+end
+
+local function autoEdgeHop()
+	if not CONFIG.autoEdgeHop or not Ctl.grounded or Ctl.plan then
+		return
+	end
+	if T < Ctl.hopCd then
+		return
+	end
+	if CONFIG.wallhopVetoS and UIS:IsKeyDown(Enum.KeyCode.S) then
+		return
+	end
+	local dir = inputDir()
+	local moving = dir.Magnitude > 0.05
+	if not moving then
+		dir = flat(root.AssemblyLinearVelocity)
+		if dir.Magnitude < 4.5 then
+			return
+		end
+	end
+	dir = dir.Unit
+	local edge = nil
+	local probe = 1
+	while probe <= CONFIG.edgeProbe do
+		if not floorProbe(root.Position + dir * probe) then
+			edge = probe
+			break
+		end
+		probe = probe + 0.5
+	end
+	if not edge then
+		return
+	end
+	local landing = landingCone(dir, 30, 10, math.max(walkSpeed() * CONFIG.maxFlight * 2.2, 30))
+	if not landing or landing.dist <= edge + 1 then
+		return
+	end
+	if landing.pos.Y < root.Position.Y - 3 and (landing.dist - edge) < 6 then
+		return
+	end
+	local available = math.max(flat(root.AssemblyLinearVelocity).Magnitude, walkSpeed() * 0.85)
+	local g = Workspace.Gravity * CONFIG.gravityMult
+	local t = clamp(math.sqrt(math.max(2 * math.max(landing.pos.Y - root.Position.Y, 2), 0) / g), 0.3, CONFIG.maxFlight)
+	local needed = (landing.dist - edge) / math.max(t, 0.25)
+	local cap = walkSpeed() * CONFIG.maxRunBoost
+	if needed > cap * 1.35 then
+		if moving then
+			Ctl.blockedAt = T + 1.2
+		end
+		return
+	end
+	if needed > cap then
+		if not CONFIG.runUp then
+			return
+		end
+		needed = cap
+	elseif needed < available * 0.6 then
+		needed = available * 0.85
+	end
+	Ctl.plan = {dir = landing.dir or dir, landing = landing, edge = edge, needed = needed}
+	Ctl.planUntil = T + 0.6
+	Ctl.hopCd = T + CONFIG.hopDebounce
+	Stats.hops = Stats.hops + 1
+end
+
+local function hazardScan()
+	if not root then
+		return
+	end
+	local pos = root.Position
+	local vel = flat(root.AssemblyLinearVelocity)
+	local closeDist, closeEta = nil, nil
+	for i = 1, #Hazard.list do
+		local part = Hazard.list[i]
+		if part.Parent then
+			local offset = flat(part.Position - pos)
+			local dist = offset.Magnitude
+			if dist <= CONFIG.sensorRange and dist > 0.01 then
+				if not closeDist or dist < closeDist then
+					closeDist = dist
+				end
+				local closing = offset.Unit:Dot(flat(part.AssemblyLinearVelocity) - vel)
+				if closing > 1.5 then
+					local eta = dist / closing
+					if eta < 3 and (not closeEta or eta < closeEta) then
+						closeEta = eta
+					end
+				end
+			end
+		end
+	end
+	Ctl.hazardDist = closeDist or 0
+	Ctl.hazardEta = closeEta or 0
+end
+
+local function hazardSidestep()
+	if not CONFIG.hazardSidestep or not Ctl.grounded or T < Ctl.sidestepCd then
+		return
+	end
+	local pos = root.Position
+	for i = 1, #Hazard.list do
+		local part = Hazard.list[i]
+		if part.Parent then
+			local offset = flat(part.Position - pos)
+			local dist = offset.Magnitude
+			if dist < CONFIG.sidestepRange and dist > 0.2 then
+				local closing = offset.Unit:Dot(flat(part.AssemblyLinearVelocity))
+				if closing > 2 then
+					Ctl.sidestepCd = T + CONFIG.sidestepCooldown
+					local side = Vector3.new(-offset.Z, 0, offset.X).Unit
+					if (math.floor(T * 7) % 2) == 0 then
+						side = -side
+					end
+					local push = (side * 0.75 + (-offset.Unit) * 0.65).Unit
+					local vel = root.AssemblyLinearVelocity
+					root.AssemblyLinearVelocity = Vector3.new(vel.X, vel.Y, vel.Z) + push * CONFIG.sidestepPower
+					Stats.dodges = Stats.dodges + 1
+					return
+				end
+			end
+		end
+	end
+end
+
+local function airControlStep(dt, dir)
+	if Ctl.grounded or dir.Magnitude < 0.05 then return end
+	local velocity = root.AssemblyLinearVelocity
+	local along = flat(velocity):Dot(dir)
+	local limit = walkSpeed() * CONFIG.speedMult
+	if along >= limit then return end
+	local add = math.min(limit - along, 26 * CONFIG.airControlGain * dt)
+	root.AssemblyLinearVelocity = velocity + dir * add
+end
+
+local function windCancel(dt)
+	if not CONFIG.windCancel or Ctl.grounded then return end
+	local ok, wind = pcall(function() return Workspace.GlobalWind end)
+	if not ok or not wind or wind.Magnitude < 4 then return end
+	root.AssemblyLinearVelocity = root.AssemblyLinearVelocity - wind * dt * 0.6
+end
+
+
+
+local function iceGrip()
+	if not CONFIG.iceGrip or not Ctl.grounded then return end
+	local floorHit = floorProbe(root.Position)
+	if not floorHit then return end
+	local part = floorHit.Instance
+	local slippery = false
+	if part.Material == Enum.Material.Ice or part.Material == Enum.Material.Glass then slippery = true end
+	local props = part.CustomPhysicalProperties
+	if props and props.Friction < 0.35 then slippery = true end
+	if not slippery then return end
+	if T < Ctl.gripCd then return end
+	Ctl.gripCd = T + 0.22
+	local dir = inputDir()
+	local velocity = root.AssemblyLinearVelocity
+	local current = flat(velocity)
+	if dir.Magnitude > 0.05 then
+		local target = dir * (walkSpeed() * CONFIG.speedMult)
+		micro(flat(target) - current)
+	else
+		micro(-current * 0.5)
+	end
+	Stats.grips = Stats.grips + 1
+end
+
+local function conveyorContact()
+	if not CONFIG.conveyorCancel or T < Ctl.conveyorCd then return end
+	local floorHit = floorProbe(root.Position)
+	local part = floorHit and floorHit.Instance or nil
+	if not part or not part.Anchored then return end
+	local push = part.AssemblyLinearVelocity
+	if push.Magnitude < 0.5 or flat(push).Magnitude < 0.5 then return end
+	Ctl.conveyorCd = T + 0.5
+	Ctl.lastConveyor = part
+	micro(-flat(push) * 0.85)
+	Stats.plats = Stats.plats + 1
+end
+
+local function platformStick()
+	if not CONFIG.platformStick or not Ctl.grounded then return end
+	local floorHit = floorProbe(root.Position)
+	local part = floorHit and floorHit.Instance or nil
+	if not part or part.Anchored then return end
+	local push = part.AssemblyLinearVelocity
+	if push.Magnitude < 0.4 then return end
+	local dir = inputDir()
+	local velocity = root.AssemblyLinearVelocity
+	if dir.Magnitude > 0.05 then
+		local drift = flat(push) - flat(velocity)
+		if drift.Magnitude > 0.6 then micro(drift * 0.5) end
+	else
+		local target = flat(push)
+		local drift = target - flat(velocity)
+		if drift.Magnitude > 0.4 then micro(drift * 0.6) end
+	end
+end
+
+local function touchGrace()
+	if not CONFIG.comboGrace then return end
+	local floorHit = floorProbe(root.Position)
+	if not floorHit or not isHazard(floorHit.Instance) then return end
+	if T < Ctl.graceCd then return end
+	Ctl.graceCd = T + 0.4
+	micro(Vector3.new(0, 6, 0))
+	Stats.graces = Stats.graces + 1
+end
+
+local function autopilot()
+	if not CONFIG.autopilot or not Ctl.grounded then return end
+	if inputDir().Magnitude > 0.05 then return end
+	local base = flat(Workspace.CurrentCamera.CFrame.LookVector)
+	local best, bestScore = nil, -1
+	for i = 0, 11 do
+		local angle = math.rad(i * 30 - 15)
+		local cos, sin = math.cos(angle), math.sin(angle)
+		local dir = Vector3.new(base.X * cos - base.Z * sin, 0, base.X * sin + base.Z * cos)
+		local landing = landingSearch(dir, 70)
+		if landing then
+			local score = landing.dist + landing.solid * 8
+			if score > bestScore then bestScore = score best = {dir = dir, landing = landing} end
+		end
+	end
+	if not best then return end
+	local target = best.dir * (walkSpeed() * CONFIG.speedMult)
+	local velocity = flat(root.AssemblyLinearVelocity)
+	micro(flat(target) - velocity)
+	pcall(function() hum:Move(best.dir, false) end)
+	if not floorProbe(root.Position + best.dir * CONFIG.edgeProbe) and best.landing.dist > 3 then
+		Ctl.plan = {dir = best.dir, landing = best.landing, edge = CONFIG.edgeProbe, needed = math.max(best.landing.dist / math.max(CONFIG.maxFlight, 0.4), walkSpeed())}
+		Ctl.planUntil = T + 0.5
+	end
+end
+
+local function damageGraceInit()
+	if not hum then return end
+	local last = hum.Health
+	local lastHit = -99
+	hum.HealthChanged:Connect(function(health)
+		if not CONFIG.enabled then
+			last = health
+			return
+		end
+		if health < last - 0.01 then
+			local damage = last - health
+			local lethal = health <= 0.01
+			local combo = (T - lastHit) < CONFIG.comboWindow
+			local fell = root and root.AssemblyLinearVelocity.Y < -45
+			local refund = false
+			if lethal and CONFIG.lethalSave then refund = true end
+			if combo and not lethal and CONFIG.comboGrace then refund = true end
+			if CONFIG.fallGuard and fell and damage >= last * 0.9 then refund = true end
+			if refund then
+				pcall(function() hum.Health = last end)
+				Stats.graces = Stats.graces + 1
+			else
+				last = health
+			end
+			lastHit = T
+		else
+			last = health
+		end
+	end)
+end
+
+local function watchedCheck()
+	Ctl.watched = false
+	if not root then return end
+	local position = root.Position
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LP then
+			local other = player.Character
+			local otherRoot = other and other:FindFirstChild("HumanoidRootPart")
+			if otherRoot then
+				local offset = position - otherRoot.Position
+				local dist = offset.Magnitude
+				if dist < 16 then
+					Ctl.watched = true
+					return
+				end
+				if dist < 50 then
+					local look = Workspace.CurrentCamera and Workspace.CurrentCamera.CFrame.LookVector or Vector3.new()
+					local dir = offset.Unit
+					if dir:Dot(look) > 0.5 then
+						Ctl.watched = true
+						return
+					end
+				end
+			end
+		end
+	end
+end
+
+local function bind(charInstance)
+	char = charInstance
+	root = char:WaitForChild("HumanoidRootPart", 10)
+	hum = char:FindFirstChildOfClass("Humanoid")
+	head = char:FindFirstChild("Head")
+	Ctl.clipState = nil
+	if hum then
+		pcall(function()
+			hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+			hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+		end)
+		damageGraceInit()
+	end
+	if UpdateHud then pcall(UpdateHud) end
+end
+
+local function engineStep(dt)
+	if not CONFIG.enabled or not root or not hum or hum.Health <= 0 then return end
+	Stats.frames = Stats.frames + 1
+	local wasGrounded = Ctl.grounded
+	Ctl.grounded = hum.FloorMaterial ~= Enum.Material.Air and hum.FloorMaterial ~= Enum.Material.Water
+	if Ctl.grounded and not wasGrounded then
+		Ctl.groundedAt = T
+		Ctl.plan = nil
+		if CONFIG.jumpBuffer and T < Ctl.buffered + CONFIG.bufferTime then
+			Ctl.buffered = 0
+			Ctl.jumpAt = T
+		end
+		if CONFIG.autoBhop and flat(root.AssemblyLinearVelocity).Magnitude > 4 then
+			Ctl.jumpAt = T
+		end
+	end
+	if wasGrounded and not Ctl.grounded then Ctl.leftAt = T end
+	watchedCheck()
+	if T >= Ctl.sensorAt then
+		Ctl.sensorAt = T + 0.5
+		sensorStep()
+	end
+	if CONFIG.noclip then
+		applyClip(true)
+	elseif Ctl.clipState == true then
+		applyClip(false)
+	end
+	if Ctl.touchLock and T >= Ctl.touchLock then
+		unshield()
+	end
+	if CONFIG.trussAssist and hum:GetState() == Enum.HumanoidStateType.Climbing and CONFIG.trussBoost > 1 then
+		local velocity = root.AssemblyLinearVelocity
+		root.AssemblyLinearVelocity = Vector3.new(velocity.X, CONFIG.trussBoost * 16, velocity.Z)
+	end
+	if CONFIG.stumbleRecovery then
+		local state = hum:GetState()
+		if state == Enum.HumanoidStateType.FallingDown or state == Enum.HumanoidStateType.Physics or state == Enum.HumanoidStateType.Ragdoll then
+			pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+		end
+	end
+	if Ctl.grounded then
+		autoEdgeHop()
+		if Ctl.plan then
+			local plan = Ctl.plan
+			local edgeNow = nil
+			local probe = 1
+			while probe <= CONFIG.edgeProbe + 2 do
+				if not floorProbe(root.Position + plan.dir * probe) then
+					edgeNow = probe
+					break
+				end
+				probe = probe + 0.5
+			end
+			local turn = inputDir()
+			if turn.Magnitude > 0.05 and turn:Dot(plan.dir) < 0.25 then
+				Ctl.plan = nil
+			elseif not edgeNow or edgeNow > CONFIG.edgeProbe + 1.5 then
+				Ctl.plan = nil
+			elseif edgeNow <= 0.8 or T > Ctl.planUntil then
+				local g = Workspace.Gravity * CONFIG.gravityMult
+				local speed = math.max(plan.needed, walkSpeed() * 0.8)
+				local dy = plan.landing.pos.Y - root.Position.Y
+				local t = clamp(plan.landing.dist / math.max(speed, 1), 0.3, CONFIG.maxFlight)
+				local vy = math.min((dy + 0.5 * g * t * t) / t, jumpVelocity())
+				root.AssemblyLinearVelocity = plan.dir * speed + Vector3.new(0, math.max(vy, 8), 0)
+				pcall(function()
+					hum.Jump = true
+					hum:ChangeState(Enum.HumanoidStateType.Jumping)
+				end)
+				Stats.timing = Stats.timing + 1
+				Ctl.aimTarget = plan.landing.pos
+				Ctl.aimPart = plan.landing.part
+				Ctl.aimSet = T
+				Ctl.aimUntil = T + clamp(t + 0.18, 0.32, CONFIG.aimHold)
+				Ctl.plan = nil
+				Ctl.lastJumpT = T
+			end
+		end
+		if wantsJump() and T > Ctl.lastJumpT + 0.08 then
+			Ctl.lastJumpT = T
+			Ctl.jumpAt = -99
+			local plan = Ctl.plan or planJump()
+			if plan and CONFIG.perfectTiming then
+				Ctl.buffered = T
+				Ctl.plan = plan
+				Ctl.planUntil = T + 0.55
+			else
+				Ctl.jumpAt = -99
+				Ctl.buffered = T
+				pcall(function()
+					hum.Jump = true
+					hum:ChangeState(Enum.HumanoidStateType.Jumping)
+				end)
+				Stats.jumps = Stats.jumps + 1
+			end
+		end
+	else
+		if Ctl.plan then Ctl.plan = nil end
+		wallStep()
+		if wantsJump() and T > Ctl.lastJumpT + 0.08 then
+			Ctl.lastJumpT = T
+			Ctl.buffered = T
+			Ctl.jumpAt = -99
+			if T - Ctl.leftAt < (CONFIG.coyote and CONFIG.coyoteTime or 0) then
+				pcall(function()
+					hum.Jump = true
+					hum:ChangeState(Enum.HumanoidStateType.Jumping)
+				end)
+				Stats.jumps = Stats.jumps + 1
+			end
+		end
+	end
+	touchGrace()
+	iceGrip()
+	conveyorContact()
+	platformStick()
+	if CONFIG.airControl and not Ctl.grounded then airControlStep(dt, inputDir()) end
+	windCancel(dt)
+	lipHop()
+	hazardScan()
+	hazardSidestep()
+	aimStep(dt)
+	if CONFIG.autopilot then autopilot() end
+	local moved = Ctl.lastPos and (root.Position - Ctl.lastPos).Magnitude or 1
+	if flat(root.AssemblyLinearVelocity).Magnitude > 3 and moved < 0.6 * dt then
+		Ctl.stuckAt = (Ctl.stuckAt or 0) + dt
+	else
+		Ctl.stuckAt = 0
+	end
+	Ctl.lastPos = root.Position
+	Ctl.lastSpeed = flat(root.AssemblyLinearVelocity).Magnitude
+end
+
+LP.CharacterAdded:Connect(function(instance)
+	task.wait(0.2)
+	pcall(bind, instance)
+end)
+
+LP.CharacterRemoving:Connect(function()
+	char, root, hum, head = nil, nil, nil, nil
+end)
+
+if LP.Character then
+	pcall(bind, LP.Character)
+else
+	LP.CharacterAdded:Wait()
+end
+
+local playerGui = LP:WaitForChild("PlayerGui")
+local gui = Instance.new("ScreenGui")
+gui.Name = "ObbyAssister"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 500
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = playerGui
+
+local function mk(class, props, parent)
+	local instance = Instance.new(class)
+	for key, value in pairs(props) do
+		if key ~= "Parent" then instance[key] = value end
+	end
+	if parent then instance.Parent = parent end
+	return instance
+end
+
+local panel = mk("Frame", {
+	Name = "Panel",
+	Size = UDim2.new(0, 600, 0, 470),
+	Position = UDim2.new(0.5, 0, 0.5, 0),
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	BackgroundColor3 = Theme.panel,
+	BorderSizePixel = 0,
+	Visible = true,
+}, gui)
+mk("UICorner", {CornerRadius = UDim.new(0, 10)}, panel)
+mk("UIStroke", {Color = Theme.track, Thickness = 1}, panel)
+
+local header = mk("Frame", {
+	Size = UDim2.new(1, 0, 0, 38),
+	BackgroundColor3 = Theme.bg,
+	BorderSizePixel = 0,
+}, panel)
+mk("UICorner", {CornerRadius = UDim.new(0, 10)}, header)
+mk("Frame", {Size = UDim2.new(1, 0, 0, 12), Position = UDim2.new(0, 0, 1, -12), BackgroundColor3 = Theme.bg, BorderSizePixel = 0}, header)
+mk("TextLabel", {
+	Text = "OBBY ASSISTER",
+	Font = Enum.Font.GothamBold,
+	TextSize = 15,
+	TextColor3 = Theme.text,
+	BackgroundTransparency = 1,
+	Size = UDim2.new(0, 160, 1, 0),
+	Position = UDim2.new(0, 12, 0, 0),
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+local modeLabel = mk("TextLabel", {
+	Text = "MODE: UNSTOPPABLE",
+	Font = Enum.Font.Code,
+	TextSize = 12,
+	TextColor3 = Theme.accent,
+	BackgroundTransparency = 1,
+	Size = UDim2.new(0, 220, 1, 0),
+	Position = UDim2.new(0, 150, 0, 0),
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+local masterButton = mk("TextButton", {
+	Text = "ASSIST ON",
+	Font = Enum.Font.GothamBold,
+	TextSize = 12,
+	TextColor3 = Theme.bg,
+	BackgroundColor3 = Theme.good,
+	BorderSizePixel = 0,
+	Size = UDim2.new(0, 96, 0, 24),
+	Position = UDim2.new(1, -212, 0.5, -12),
+}, header)
+mk("UICorner", {CornerRadius = UDim.new(0, 6)}, masterButton)
+local minButton = mk("TextButton", {
+	Text = "_",
+	Font = Enum.Font.GothamBold,
+	TextSize = 16,
+	TextColor3 = Theme.text,
+	BackgroundColor3 = Theme.row,
+	BorderSizePixel = 0,
+	Size = UDim2.new(0, 30, 0, 24),
+	Position = UDim2.new(1, -108, 0.5, -12),
+}, header)
+mk("UICorner", {CornerRadius = UDim.new(0, 6)}, minButton)
+local closeButton = mk("TextButton", {
+	Text = "X",
+	Font = Enum.Font.GothamBold,
+	TextSize = 13,
+	TextColor3 = Theme.bad,
+	BackgroundColor3 = Theme.row,
+	BorderSizePixel = 0,
+	Size = UDim2.new(0, 30, 0, 24),
+	Position = UDim2.new(1, -42, 0.5, -12),
+}, header)
+mk("UICorner", {CornerRadius = UDim.new(0, 6)}, closeButton)
+
+local body = mk("Frame", {
+	Size = UDim2.new(1, 0, 1, -38),
+	Position = UDim2.new(0, 0, 0, 38),
+	BackgroundTransparency = 1,
+}, panel)
+
+local status = mk("Frame", {
+	Size = UDim2.new(1, -16, 0, 26),
+	Position = UDim2.new(0, 8, 0, 6),
+	BackgroundColor3 = Theme.bg,
+	BorderSizePixel = 0,
+}, body)
+mk("UICorner", {CornerRadius = UDim.new(0, 6)}, status)
+local statusLabel = mk("TextLabel", {
+	Text = "",
+	Font = Enum.Font.Code,
+	TextSize = 12,
+	TextColor3 = Theme.dim,
+	BackgroundTransparency = 1,
+	Size = UDim2.new(1, -12, 1, 0),
+	Position = UDim2.new(0, 8, 0, 0),
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, status)
+
+local leftColumn = mk("ScrollingFrame", {
+	Size = UDim2.new(0, 340, 1, -132),
+	Position = UDim2.new(0, 8, 0, 36),
+	BackgroundColor3 = Theme.bg,
+	BorderSizePixel = 0,
+	ScrollBarThickness = 4,
+	CanvasSize = UDim2.new(0, 0, 0, 0),
+}, body)
+mk("UICorner", {CornerRadius = UDim.new(0, 8)}, leftColumn)
+local leftLayout = mk("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, leftColumn)
+mk("UIPadding", {PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, leftColumn)
+
+local rightColumn = mk("ScrollingFrame", {
+	Size = UDim2.new(0, 232, 1, -132),
+	Position = UDim2.new(1, -240, 0, 36),
+	BackgroundColor3 = Theme.bg,
+	BorderSizePixel = 0,
+	ScrollBarThickness = 4,
+	CanvasSize = UDim2.new(0, 0, 0, 0),
+}, body)
+mk("UICorner", {CornerRadius = UDim.new(0, 8)}, rightColumn)
+local rightLayout = mk("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, rightColumn)
+mk("UIPadding", {PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6)}, rightColumn)
+
+local footer = mk("Frame", {
+	Size = UDim2.new(1, -16, 0, 46),
+	Position = UDim2.new(0, 8, 1, -52),
+	BackgroundColor3 = Theme.bg,
+	BorderSizePixel = 0,
+}, body)
+mk("UICorner", {CornerRadius = UDim.new(0, 8)}, footer)
+
+local order = 0
+local function nextOrder()
+	order = order + 1
+	return order
+end
+
+local function sectionLabel(parent, text)
+	local label = mk("TextLabel", {
+		Text = text,
+		Font = Enum.Font.GothamBold,
+		TextSize = 11,
+		TextColor3 = Theme.accent,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, 0, 0, 18),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		LayoutOrder = nextOrder(),
+		Parent = parent,
+	})
+	return label
+end
+
+local rows = {}
+
+local function makeToggleRow(parent, spec)
+	local row = mk("Frame", {
+		Size = UDim2.new(1, 0, 0, 26),
+		BackgroundColor3 = Theme.row,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(),
+		Parent = parent,
+	})
+	mk("UICorner", {CornerRadius = UDim.new(0, 6)}, row)
+	local button = mk("TextButton", {
+		Text = "ON",
+		Font = Enum.Font.Code,
+		TextSize = 12,
+		TextColor3 = Theme.bg,
+		BackgroundColor3 = Theme.good,
+		BorderSizePixel = 0,
+		Size = UDim2.new(0, 40, 0, 18),
+		Position = UDim2.new(0, 6, 0.5, -9),
+		Parent = row,
+	})
+	mk("UICorner", {CornerRadius = UDim.new(0, 5)}, button)
+	local label = mk("TextLabel", {
+		Text = spec.name,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextColor3 = Theme.text,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -54, 1, 0),
+		Position = UDim2.new(0, 52, 0, 0),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = row,
+	})
+	button.MouseButton1Click:Connect(function()
+		CONFIG[spec.key] = not CONFIG[spec.key]
+		CONFIG.preset = "CUSTOM"
+		Refresh()
+		Persist()
+	end)
+	local entry = {key = spec.key, kind = "toggle", button = button, label = label, row = row}
+	table.insert(rows, entry)
+	return entry
+end
+
+local function makeSliderRow(parent, spec)
+	local row = mk("Frame", {
+		Size = UDim2.new(1, 0, 0, 42),
+		BackgroundColor3 = Theme.row,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(),
+		Parent = parent,
+	})
+	mk("UICorner", {CornerRadius = UDim.new(0, 6)}, row)
+	local label = mk("TextLabel", {
+		Text = spec.label,
+		Font = Enum.Font.Gotham,
+		TextSize = 11,
+		TextColor3 = Theme.text,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1, -92, 0, 14),
+		Position = UDim2.new(0, 8, 0, 4),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Parent = row,
+	})
+	local value = mk("TextLabel", {
+		Text = "0",
+		Font = Enum.Font.Code,
+		TextSize = 11,
+		TextColor3 = Theme.accent,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(0, 40, 0, 14),
+		Position = UDim2.new(1, -46, 0, 4),
+		TextXAlignment = Enum.TextXAlignment.Right,
+		Parent = row,
+	})
+	local minus = mk("TextButton", {
+		Text = "-",
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = Theme.text,
+		BackgroundColor3 = Theme.rowAlt,
+		BorderSizePixel = 0,
+		Size = UDim2.new(0, 18, 0, 18),
+		Position = UDim2.new(1, -90, 0, 2),
+		Parent = row,
+	})
+	local plus = mk("TextButton", {
+		Text = "+",
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = Theme.text,
+		BackgroundColor3 = Theme.rowAlt,
+		BorderSizePixel = 0,
+		Size = UDim2.new(0, 18, 0, 18),
+		Position = UDim2.new(1, -70, 0, 2),
+		Parent = row,
+	})
+	local track = mk("Frame", {
+		Size = UDim2.new(1, -16, 0, 8),
+		Position = UDim2.new(0, 8, 1, -18),
+		BackgroundColor3 = Theme.track,
+		BorderSizePixel = 0,
+		Parent = row,
+	})
+	mk("UICorner", {CornerRadius = UDim.new(1, 0)}, track)
+	local fill = mk("Frame", {
+		Size = UDim2.new(0, 0, 1, 0),
+		BackgroundColor3 = Theme.accent,
+		BorderSizePixel = 0,
+		Parent = track,
+	})
+	mk("UICorner", {CornerRadius = UDim.new(1, 0)}, fill)
+	local knob = mk("Frame", {
+		Size = UDim2.new(0, 14, 0, 14),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		BackgroundColor3 = Theme.text,
+		BorderSizePixel = 0,
+		Parent = track,
+	})
+	mk("UICorner", {CornerRadius = UDim.new(1, 0)}, knob)
+	local function setValue(raw)
+		local stepped = math.floor((raw - spec.min) / spec.step + 0.5) * spec.step + spec.min
+		CONFIG[spec.key] = math.floor(math.min(math.max(stepped, spec.min), spec.max) * 1000 + 0.5) / 1000
+		CONFIG.preset = "CUSTOM"
+		Refresh()
+		Persist()
+	end
+	local dragging = false
+	local function fromX(x)
+		local width = track.AbsoluteSize.X
+		if width <= 0 then return end
+		local alpha = clamp((x - track.AbsolutePosition.X) / width, 0, 1)
+		setValue(spec.min + alpha * (spec.max - spec.min))
+	end
+	track.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			fromX(input.Position.X)
+		end
+	end)
+	track.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+	UIS.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			fromX(input.Position.X)
+		end
+	end)
+	minus.MouseButton1Click:Connect(function() setValue((CONFIG[spec.key] or spec.min) - spec.step) end)
+	plus.MouseButton1Click:Connect(function() setValue((CONFIG[spec.key] or spec.min) + spec.step) end)
+	local entry = {key = spec.key, kind = "slider", spec = spec, label = label, value = value, fill = fill, knob = knob, track = track, row = row}
+	table.insert(rows, entry)
+	return entry
+end
+
+local currentGroup = nil
+for i = 1, #TOGGLES do
+	local spec = TOGGLES[i]
+	if spec.group ~= currentGroup then
+		currentGroup = spec.group
+		sectionLabel(leftColumn, spec.group)
+	end
+	makeToggleRow(leftColumn, spec)
+end
+local sliderGroup = nil
+for i = 1, #SLIDERS do
+	local spec = SLIDERS[i]
+	if spec.group ~= sliderGroup then
+		sliderGroup = spec.group
+		sectionLabel(rightColumn, spec.group)
+	end
+	makeSliderRow(rightColumn, spec)
+end
+
+task.defer(function()
+	leftColumn.CanvasSize = UDim2.new(0, 0, 0, leftLayout.AbsoluteContentSize.Y + 10)
+	rightColumn.CanvasSize = UDim2.new(0, 0, 0, rightLayout.AbsoluteContentSize.Y + 10)
+end)
+
+local presetOrder = {"UNSTOPPABLE", "ALMOST_HUMAN", "SUBTLE", "SPEEDRUNNER", "GHOST"}
+
+local function applyPreset(name)
+	local preset = PRESETS[name]
+	if not preset then return end
+	for key, value in pairs(preset) do
+		CONFIG[key] = value
+	end
+	CONFIG.preset = name
+	Refresh()
+	Persist()
+end
+
+local openButton
+local buttonSpecs = {
+	{text = "PRESET >", action = function()
+		local index = table.find(presetOrder, CONFIG.preset) or 0
+		index = index % #presetOrder + 1
+		applyPreset(presetOrder[index])
+	end, color = Theme.accent},
+	{text = "RESET", action = function()
+		applyPreset("UNSTOPPABLE")
+	end, color = Theme.text},
+	{text = "SAVE", action = function()
+		Persist(true)
+	end, color = Theme.text},
+	{text = "LOAD", action = function()
+		Restore()
+		Refresh()
+	end, color = Theme.text},
+	{text = "COPY", action = function()
+		local parts = {}
+		for key, value in pairs(CONFIG) do
+			table.insert(parts, key .. "=" .. tostring(value))
+		end
+		local text = table.concat(parts, ",")
+		local ok = pcall(function() setclipboard(text) end)
+		if not ok then
+			ok = pcall(function()
+				local box = mk("TextBox", {Text = text, Size = UDim2.new(0, 10, 0, 10), Parent = panel})
+				box:CaptureFocus()
+				box:ReleaseFocus()
+				box:Destroy()
+			end)
+		end
+		print("[OBBY ASSIST] config " .. (ok and "copied to clipboard" or "printed") .. " :: " .. text)
+	end, color = Theme.text},
+	{text = "GHOST", action = function()
+		applyPreset("GHOST")
+	end, color = Theme.warn},
+	{text = "HIDE", action = function()
+		panel.Visible = false
+		openButton.Visible = true
+	end, color = Theme.bad},
+}
+for i = 1, #buttonSpecs do
+	local spec = buttonSpecs[i]
+	local button = mk("TextButton", {
+		Text = spec.text,
+		Font = Enum.Font.GothamBold,
+		TextSize = 11,
+		TextColor3 = spec.color,
+		BackgroundColor3 = Theme.row,
+		BorderSizePixel = 0,
+		Size = UDim2.new(0, 74, 0, 30),
+		Position = UDim2.new(0, 6 + (i - 1) * 78, 0.5, -15),
+		Parent = footer,
+	})
+	mk("UICorner", {CornerRadius = UDim.new(0, 6)}, button)
+	button.MouseButton1Click:Connect(function()
+		pcall(spec.action)
+		Refresh()
+	end)
+end
+
+openButton = mk("TextButton", {
+	Text = "OA",
+	Font = Enum.Font.GothamBold,
+	TextSize = 14,
+	TextColor3 = Theme.bg,
+	BackgroundColor3 = Theme.accent,
+	BorderSizePixel = 0,
+	Size = UDim2.new(0, 46, 0, 46),
+	Position = UDim2.new(0, 18, 0.72, 0),
+	Visible = false,
+	Parent = gui,
+})
+mk("UICorner", {CornerRadius = UDim.new(1, 0)}, openButton)
+mk("UIStroke", {Color = Theme.bg, Thickness = 2}, openButton)
+
+local hud = mk("Frame", {
+	Size = UDim2.new(0, 260, 0, 54),
+	Position = UDim2.new(0, 14, 0, 14),
+	BackgroundColor3 = Theme.bg,
+	BackgroundTransparency = 0.15,
+	BorderSizePixel = 0,
+	Parent = gui,
+})
+mk("UICorner", {CornerRadius = UDim.new(0, 8)}, hud)
+mk("UIStroke", {Color = Theme.track, Thickness = 1}, hud)
+local hudTitle = mk("TextLabel", {
+	Text = "OBBY ASSISTER",
+	Font = Enum.Font.GothamBold,
+	TextSize = 12,
+	TextColor3 = Theme.accent,
+	BackgroundTransparency = 1,
+	Size = UDim2.new(1, -12, 0, 16),
+	Position = UDim2.new(0, 8, 0, 4),
+	TextXAlignment = Enum.TextXAlignment.Left,
+	Parent = hud,
+})
+local hudLine1 = mk("TextLabel", {
+	Text = "",
+	Font = Enum.Font.Code,
+	TextSize = 11,
+	TextColor3 = Theme.text,
+	BackgroundTransparency = 1,
+	Size = UDim2.new(1, -12, 0, 14),
+	Position = UDim2.new(0, 8, 0, 20),
+	TextXAlignment = Enum.TextXAlignment.Left,
+	Parent = hud,
+})
+local hudLine2 = mk("TextLabel", {
+	Text = "",
+	Font = Enum.Font.Code,
+	TextSize = 11,
+	TextColor3 = Theme.dim,
+	BackgroundTransparency = 1,
+	Size = UDim2.new(1, -12, 0, 14),
+	Position = UDim2.new(0, 8, 0, 34),
+	TextXAlignment = Enum.TextXAlignment.Left,
+	Parent = hud,
+})
+
+local function draggable(frame)
+	local dragging = false
+	local offset = Vector2.new()
+	frame.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			if frame.AbsolutePosition and frame.AbsoluteSize then
+				dragging = true
+				offset = Vector2.new(input.Position.X - frame.AbsolutePosition.X * (1 - frame.AnchorPoint.X), input.Position.Y - frame.AbsolutePosition.Y * (1 - frame.AnchorPoint.Y))
+			end
+		end
+	end)
+	UIS.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			frame.Position = UDim2.new(0, input.Position.X - offset.X, 0, input.Position.Y - offset.Y)
+		end
+	end)
+	frame.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+end
+
+draggable(header)
+draggable(openButton)
+draggable(hud)
+
+local groups = {}
+for i = 1, #TOGGLES do
+	local group = TOGGLES[i].group
+	if not table.find(groups, group) then table.insert(groups, group) end
+end
+
+local function activeCount()
+	local count, total = 0, 0
+	for i = 1, #TOGGLES do
+		local spec = TOGGLES[i]
+		if type(spec) == "table" then
+			total = total + 1
+			if CONFIG[spec.key] then
+				count = count + 1
+			end
+		end
+	end
+	return count, total
+end
+
+function Refresh()
+	for i = 1, #rows do
+		local entry = rows[i]
+		if type(entry) == "table" and entry.kind == "toggle" then
+			local isOn = CONFIG[entry.key] and true or false
+			if entry.button then
+				entry.button.Text = isOn and "ON" or "OFF"
+				entry.button.BackgroundColor3 = isOn and Theme.good or Theme.track
+				entry.button.TextColor3 = isOn and Theme.bg or Theme.dim
+			end
+			if entry.row then
+				entry.row.BackgroundColor3 = isOn and Theme.rowAlt or Theme.row
+			end
+		elseif type(entry) == "table" then
+			local spec = entry.spec
+			if type(spec) ~= "table" then
+				spec = {}
+			end
+			local minV = tonumber(spec.min) or 0
+			local maxV = tonumber(spec.max) or (minV + 1)
+			if maxV <= minV then
+				maxV = minV + 1
+			end
+			local stepV = tonumber(spec.step) or 0.05
+			if stepV <= 0 then
+				stepV = 0.05
+			end
+			local value = tonumber(CONFIG[entry.key]) or minV
+			local alpha = clamp((value - minV) / (maxV - minV), 0, 1)
+			if entry.value then
+				if stepV >= 1 then
+					entry.value.Text = string.format("%.0f", value)
+				else
+					entry.value.Text = string.format("%.2f", value)
+				end
+			end
+			if entry.fill then
+				entry.fill.Size = UDim2.new(alpha, 0, 1, 0)
+			end
+			if entry.knob then
+				entry.knob.Position = UDim2.new(alpha, 0, 0.5, 0)
+			end
+		end
+	end
+	local count, total = activeCount()
+	modeLabel.Text = "MODE: " .. tostring(CONFIG.preset)
+	local resolved = (Stats.timing or 0) + (Stats.wallhops or 0) + (Stats.hops or 0) + (Stats.lipHops or 0) + (Stats.aims or 0) + (Stats.dodges or 0)
+	local statusText
+	if (Ctl.flashAt or 0) > T then
+		statusText = ">> " .. tostring(Ctl.flash or "")
+	elseif (Ctl.blockedAt or 0) > T then
+		statusText = "UNJUMPABLE GAP - HOLD SHIFT FOR RUN UP OR FIND ANOTHER ROUTE"
+	else
+		statusText = string.format("ACTIVE %d/%d   SOLVED %d   HOP %d  WALL %d  AIM %d  LIP %d  DODGE %d   GRIP %d  GRACE %d   ETA %s   WATCHED %s",
+			count, total, resolved, Stats.hops or 0, Stats.wallhops or 0, Stats.aims or 0, Stats.lipHops or 0, Stats.dodges or 0, Stats.grips or 0, Stats.graces or 0,
+			(Ctl.hazardEta or 0) > 0 and string.format("%.2fs", Ctl.hazardEta) or "--",
+			Ctl.watched and "YES" or "no")
+	end
+	statusLabel.Text = statusText
+	masterButton.Text = CONFIG.enabled and "ASSIST ON" or "ASSIST OFF"
+	masterButton.BackgroundColor3 = CONFIG.enabled and Theme.good or Theme.bad
+	hud.Visible = CONFIG.hud
+end
+
+function UpdateHud()
+	if hudLine1 then
+		local count, total = activeCount()
+		local solved = (Stats.timing or 0) + (Stats.wallhops or 0) + (Stats.hops or 0) + (Stats.lipHops or 0) + (Stats.aims or 0) + (Stats.dodges or 0)
+		hudLine1.Text = string.format("%s  %d/%d  SOLVED %d", CONFIG.enabled and "ON" or "OFF", count, total, solved)
+		hudLine2.Text = string.format("hop %d  wall %d  aim %d  lip %d  dodge %d", Stats.hops or 0, Stats.wallhops or 0, Stats.aims or 0, Stats.lipHops or 0, Stats.dodges or 0)
+		hudTitle.Text = Ctl.wallReady and "OBBY ASSISTER - WALLHOP READY" or "OBBY ASSISTER"
+	end
+end
+
+function Persist(announce)
+	if not CONFIG.persist then return end
+	for key, value in pairs(CONFIG) do
+		if type(value) == "boolean" or type(value) == "number" or type(value) == "string" then
+			pcall(function() LP:SetAttribute("OA_" .. key, value) end)
+		end
+	end
+	if announce then
+		print("[OBBY ASSIST] settings saved")
+	end
+end
+
+function Restore()
+	for key, value in pairs(CONFIG) do
+		local stored = LP:GetAttribute("OA_" .. key)
+		if stored ~= nil then CONFIG[key] = stored end
+	end
+end
+
+Restore()
+Refresh()
+UpdateHud()
+
+masterButton.MouseButton1Click:Connect(function()
+	CONFIG.enabled = not CONFIG.enabled
+	Refresh()
+	Persist()
+	if not CONFIG.enabled then
+		if hum then pcall(function() hum:Move(Vector3.new(), false) end) end
+		if Ctl.clipState == true then applyClip(false) end
+		unshield()
+	end
+end)
+
+minButton.MouseButton1Click:Connect(function()
+	body.Visible = not body.Visible
+	panel.Size = body.Visible and UDim2.new(0, 600, 0, 470) or UDim2.new(0, 600, 0, 38)
+end)
+
+closeButton.MouseButton1Click:Connect(function()
+	panel.Visible = false
+	openButton.Visible = true
+end)
+
+openButton.MouseButton1Click:Connect(function()
+	panel.Visible = true
+	openButton.Visible = false
+end)
+
+UIS.InputBegan:Connect(function(input, processed)
+	if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.ButtonA then
+		Ctl.jumpAt = T
+	end
+	if processed then return end
+	if input.KeyCode == Enum.KeyCode[CONFIG.guiKey] then
+		panel.Visible = not panel.Visible
+		openButton.Visible = not panel.Visible
+	elseif input.KeyCode == Enum.KeyCode[CONFIG.quickKey] then
+		CONFIG.enabled = not CONFIG.enabled
+		Refresh()
+		Persist()
+	elseif input.KeyCode == Enum.KeyCode[CONFIG.powerKey] then
+		local powerOn = not CONFIG.autoEdgeHop
+		CONFIG.autoEdgeHop = powerOn
+		CONFIG.planAim = true
+		Ctl.flash = powerOn and "POWER ASSIST ON" or "POWER ASSIST OFF"
+		Ctl.flashAt = T + 2
+		Refresh()
+		Persist()
+	end
+end)
+
+local stepErrors = 0
+
+local function onStepped(stepName, stepDelta)
+	T = os.clock()
+	local ok, err = pcall(engineStep, stepDelta)
+	if not ok and stepErrors < 4 then
+		stepErrors = stepErrors + 1
+		warn("[OBBY ASSIST] assist error " .. stepErrors .. "/4 :: " .. tostring(err))
+	end
+	if T - Ctl.lastHud > 0.2 then
+		Ctl.lastHud = T
+		pcall(UpdateHud)
+		pcall(Refresh)
+	end
+end
+
+RunService.Stepped:Connect(onStepped)
+
+local function autosave()
+	while true do
+		task.wait(12)
+		if CONFIG.persist then
+			Persist()
+		end
+	end
+end
+
+task.spawn(autosave)
+
+print("[OBBY ASSIST] loaded. " .. CONFIG.guiKey .. " toggles the panel, " .. CONFIG.quickKey .. " toggles assistance, " .. CONFIG.powerKey .. " toggles the power stack.")
+print("[OBBY ASSIST] end of file. Nothing may follow this line. Options: " .. tostring(#TOGGLES + #SLIDERS))
