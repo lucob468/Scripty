@@ -1,0 +1,2340 @@
+--[[
+	BUILD MIRROR  v2.1
+	Standalone LocalScript for a Plane Crazy-style build sandbox.
+	Place in: StarterPlayer > StarterPlayerScripts  (LocalScript)
+
+	What it does:
+		1. SCAN BUILD        captures every block/build payload on your plot
+		2. SHOW ALL · PASTE  rebuilds the WHOLE capture as real parts inside the plot
+		SET                  pin the baseplate under your character as the destination
+		PREVIEW LAYER        optional ghost preview, one height layer at a time
+		LAYER +/-            inspect / preview stacked build layers
+		CLEAR PASTED         removes only the generated assembly
+
+	v2.1 guarantees:
+		- No per-part bounds rejection. The entire capture is translated as one
+		  assembly into the destination plot, so wings/overhangs are never cropped.
+		- Blocks are captured with their enclosing block/build Model (or whole-build
+		  Folder). Attributes, tags, Configuration/Value children, scripts and
+		  existing joints are preserved.
+		- Paste runs in the local player's current plot by default ("LOCAL_PLOT").
+
+	Important:
+		- Paste is LOCAL by default. Parts exist on this client only. If your replica
+		  has an authoritative server builder, connect CONFIG.ON_PASTE_COMMIT to your
+		  own RemoteEvent / builder function. This script does not bypass other games.
+		- The original "LAG SERVER" button was removed on purpose. It is a griefing /
+		  performance-abuse feature and should never ship in a real game script.
+		- Jetpack visual credit: brotabrr (safe visual clone, scripts disabled).
+
+	No loadstring, no external modules, no infinite WaitForChild at startup.
+--]]
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CollectionService = game:GetService("CollectionService")
+
+local lp = Players.LocalPlayer
+
+-- Forward declarations shared by the builder, UI and cleanup paths.
+-- No-op defaults make early lifecycle events safe before the UI exists.
+local ui = {}
+local function noop() end
+local notify, refreshUI, unload = noop, noop, noop
+
+-- ============================== CONFIG ==============================
+local CONFIG = {
+	UI_NAME = "BuildMirror_v21",
+
+	-- Plane Crazy reference: 51 blocks x 51 blocks, 2.5 studs per block.
+	GRID = 2.5,
+	PLOT_SIZE_HINT = Vector3.new(127.5, 2.5, 127.5),
+	PLOT_HEIGHT = 97.5, -- 39 blocks, with a little headroom
+	PLOT_MIN_SIZE = 24,
+	PLOT_MAX_SIZE = 600,
+	SEARCH_RADIUS = 150,
+	BELOW_PLOT_TOLERANCE = 5,
+	ABOVE_PLOT_SLACK = 20,
+
+	MAX_CAPTURE = 5000,
+	-- If every selected part shares a build Model, capture that Model once. This
+	-- keeps cross-block ObjectValue references, scripts, motors and joints intact
+	-- instead of splitting the craft into independent block payloads.
+	CAPTURE_WHOLE_BUILD_MODEL = true,
+	PASTE_BATCH = 24,
+	PASTE_MARGIN = 1,
+	CAPTURE_MARGIN = 4,
+
+	-- Where paste goes. "LOCAL_PLOT" uses the plot under the local player right
+	-- now, so clearing the source and walking to your own plot still works.
+	-- "SCANNED_PLOT" always uses the plot that was scanned.
+	PASTE_TARGET = "LOCAL_PLOT",
+	-- Pan/translate the whole assembly so every piece fits in the plot. Parts are
+	-- never silently dropped for being over an edge. Oversized builds are kept
+	-- and reported instead of deleted.
+	FIT_WHOLE_BUILD_TO_PLOT = true,
+
+	-- Optional override: CONFIG.PLOT = workspace.MyPlot
+	PLOT = nil,
+	PLOT_RESOLVER = nil, -- function(): BasePart?
+	PLOT_TAGS = { "BuildPlot", "PlayerPlot", "Plot" },
+	PLOT_NAMES = {
+		"plot", "buildplot", "playerplot", "baseplate", "basesplate", "base",
+		"plotbase", "buildbase", "platform",
+	},
+
+	-- Parent for generated folders. Leave nil to use workspace.
+	PASTE_PARENT = nil,
+	PREVIEW_TRANSPARENCY = 0.62,
+	FREEZE_AFTER_PASTE = true,
+	-- Set false if your launch system should own the final root joint.
+	WELD_PASTE_TO_PLOT = true,
+
+	-- Block configuration retention. Whole block/build models are captured as
+	-- one payload, so attributes, tags, Configuration/Value objects, child scripts
+	-- and existing joints survive the copy. Only set these to false if your
+	-- replica needs a destructive flat import.
+	KEEP_CONFIGS = true,
+	STRIP_SCRIPTS_FROM_PASTE = false,
+	KEEP_EFFECTS_IN_PASTE = true,
+	-- Scripts are part of many block configs, so they are kept. Play safe by
+	-- disabling them here if your replica's cloned scripts are not idempotent.
+	DISABLE_PASTED_SCRIPTS = false,
+	-- Preserve existing Weld/WeldConstraint/Motor6D/Hinge joints inside a block
+	-- payload instead of locking every part with a new rigid weld.
+	PRESERVE_EXISTING_JOINTS = true,
+
+	-- Hook point for your own authoritative builder.
+	-- Receives (part, entry, plot) once per created part. Return false to remove it.
+	ON_PASTE_COMMIT = nil,
+
+	-- Optional asset. Missing asset no longer blocks the whole script.
+	JETPACK_TEMPLATE = nil,
+	JETPACK_HOVER_MIN = 10,
+	JETPACK_HOVER_MAX = 24,
+	JETPACK_MAX_SPEED = 25,
+	JETPACK_EASING = 0.12,
+
+	KEY_JETPACK = Enum.KeyCode.T,
+	KEY_UP = Enum.KeyCode.E,
+	KEY_DOWN = Enum.KeyCode.Q,
+	KEY_TOGGLE_UI = Enum.KeyCode.F2,
+	SPEED_DEFAULT = 16,
+	SPEED_FAST = 100,
+}
+-- ============================ END CONFIG ============================
+
+local COLORS = {
+	bg = Color3.fromRGB(17, 20, 18),
+	panel = Color3.fromRGB(24, 28, 25),
+	panel2 = Color3.fromRGB(31, 36, 32),
+	stroke = Color3.fromRGB(52, 60, 53),
+	text = Color3.fromRGB(235, 240, 233),
+	dim = Color3.fromRGB(139, 151, 139),
+	lime = Color3.fromRGB(196, 255, 61),
+	green = Color3.fromRGB(46, 160, 87),
+	blue = Color3.fromRGB(54, 131, 214),
+	amber = Color3.fromRGB(224, 165, 52),
+	red = Color3.fromRGB(190, 67, 59),
+	darkText = Color3.fromRGB(12, 16, 12),
+}
+
+local state = {
+	blueprint = nil,
+	previewActive = false,
+	previewLayerOnly = true,
+	previewFolder = nil,
+	pastedFolder = nil,
+	pastedRoot = nil,
+	pastedFrozen = true,
+	pastedParts = {},
+	pasting = false,
+	scanning = false,
+	plotPinned = nil,
+	cancelPaste = false,
+	pasteToken = 0,
+	layerIndex = 1,
+	fast = false,
+	jetpackEnabled = false,
+	jetpackClone = nil,
+	jetpackModel = nil,
+	fireParts = {},
+	idleTrack = nil,
+	flyAttachment = nil,
+	flyVelocity = nil,
+	upPressed = false,
+	downPressed = false,
+	verticalSpeed = 0,
+	unloaded = false,
+	uiCollapsed = false,
+	connections = {},
+}
+
+local char, hum, hrp, animator
+local rayParams = RaycastParams.new()
+do
+	local ok, filter = pcall(function()
+		return Enum.RaycastFilterType.Exclude
+	end)
+	rayParams.FilterType = ok and filter or Enum.RaycastFilterType.Blacklist
+	rayParams.IgnoreWater = true
+end
+
+-- ============================== UTIL ==============================
+local function addConnection(connection)
+	table.insert(state.connections, connection)
+	return connection
+end
+
+local function isFiniteVector(v)
+	return typeof(v) == "Vector3"
+		and v.X == v.X and v.Y == v.Y and v.Z == v.Z
+		and math.abs(v.X) < 1e6 and math.abs(v.Y) < 1e6 and math.abs(v.Z) < 1e6
+end
+
+local function isCharacterPart(part, characters)
+	for _, character in ipairs(characters) do
+		if character and character.Parent and part:IsDescendantOf(character) then
+			return true
+		end
+	end
+	return false
+end
+
+local function isGenerated(instance)
+	local node = instance
+	for _ = 1, 8 do
+		if not node or node == workspace then return false end
+		if node:GetAttribute("BuildMirrorGenerated") then return true end
+		node = node.Parent
+	end
+	return false
+end
+
+local function getOrigin()
+	if hrp and hrp.Parent then return hrp.Position end
+	local camera = workspace.CurrentCamera
+	if camera then return camera.CFrame.Position end
+	return Vector3.new(0, 0, 0)
+end
+
+local function applyRayFilter()
+	local list = {}
+	if char then table.insert(list, char) end
+	if state.previewFolder then table.insert(list, state.previewFolder) end
+	if state.pastedFolder then table.insert(list, state.pastedFolder) end
+	rayParams.FilterDescendantsInstances = list
+end
+
+local function safeParent(parent)
+	if parent and parent ~= game and parent ~= lp then return parent end
+	return workspace
+end
+
+local function clearFolder(folder)
+	if folder then
+		folder:Destroy()
+	end
+	return nil
+end
+
+-- ============================ CHARACTER ============================
+local function stopJetpackVisuals()
+	if state.idleTrack then
+		pcall(function() state.idleTrack:Stop() end)
+		state.idleTrack = nil
+	end
+	if state.jetpackClone then
+		state.jetpackClone:Destroy()
+		state.jetpackClone = nil
+	end
+	if state.flyVelocity then state.flyVelocity:Destroy() end
+	if state.flyAttachment then state.flyAttachment:Destroy() end
+	state.flyVelocity = nil
+	state.flyAttachment = nil
+	state.jetpackModel = nil
+	state.fireParts = {}
+	state.verticalSpeed = 0
+	state.upPressed = false
+	state.downPressed = false
+end
+
+local function bindCharacter(character)
+	char = character
+	stopJetpackVisuals()
+	state.jetpackEnabled = false
+	hum = nil
+	hrp = nil
+	animator = nil
+
+	hum = character:WaitForChild("Humanoid", 10)
+	hrp = character:WaitForChild("HumanoidRootPart", 10)
+	if hum then
+		animator = hum:FindFirstChildWhichIsA("Animator")
+		if not animator then
+			animator = Instance.new("Animator")
+			animator.Parent = hum
+		end
+		hum.WalkSpeed = state.fast and CONFIG.SPEED_FAST or CONFIG.SPEED_DEFAULT
+		hum.Died:Connect(function()
+			stopJetpackVisuals()
+			state.jetpackEnabled = false
+			refreshUI()
+		end)
+	end
+	applyRayFilter()
+end
+
+if lp.Character then
+	task.spawn(bindCharacter, lp.Character)
+end
+addConnection(lp.CharacterAdded:Connect(function(character)
+	task.spawn(bindCharacter, character)
+end))
+
+-- ============================== PLOT ==============================
+local function plotPartFrom(instance)
+	if not instance then return nil end
+	if instance:IsA("BasePart") then return instance end
+	if instance:IsA("Model") then
+		return instance.PrimaryPart or instance:FindFirstChildWhichIsA("BasePart", true)
+	end
+	return nil
+end
+
+local function isPlotSized(part)
+	if not part or not part:IsA("BasePart") then return false end
+	local size = part.Size
+	if size.X < CONFIG.PLOT_MIN_SIZE or size.Z < CONFIG.PLOT_MIN_SIZE then return false end
+	if size.X > CONFIG.PLOT_MAX_SIZE or size.Z > CONFIG.PLOT_MAX_SIZE then return false end
+	if size.Y > 100 then return false end
+	return true
+end
+
+local function nameScore(part)
+	local name = string.lower(part.Name)
+	for _, expected in ipairs(CONFIG.PLOT_NAMES) do
+		if name == string.lower(expected) or string.find(name, string.lower(expected), 1, true) then
+			return 1
+		end
+	end
+	return 0
+end
+
+local function belongsToLocalPlayer(part)
+	local ownerId = part:GetAttribute("UserId")
+		or part:GetAttribute("OwnerUserId")
+		or part:GetAttribute("PlayerId")
+	if ownerId and tonumber(ownerId) == lp.UserId then
+		return true
+	end
+	local names = {
+		string.lower(lp.Name),
+		string.lower(lp.DisplayName or lp.Name),
+	}
+	local node = part
+	for _ = 1, 8 do
+		if not node or node == workspace then break end
+		local nodeName = string.lower(node.Name)
+		for _, playerName in ipairs(names) do
+			if nodeName == playerName
+				or string.find(nodeName, playerName, 1, true)
+				or nodeName == playerName .. "'s plot"
+				or nodeName == playerName .. "s plot" then
+				return true
+			end
+		end
+		local owner = node:GetAttribute("UserId") or node:GetAttribute("OwnerUserId")
+		if owner and tonumber(owner) == lp.UserId then return true end
+		node = node.Parent
+	end
+	return false
+end
+
+local function resolvePlot()
+	if CONFIG.PLOT and CONFIG.PLOT.Parent and CONFIG.PLOT:IsA("BasePart") then
+		return CONFIG.PLOT
+	end
+	if type(CONFIG.PLOT_RESOLVER) == "function" then
+		local ok, resolved = pcall(CONFIG.PLOT_RESOLVER)
+		if ok and resolved and resolved:IsA("BasePart") and resolved.Parent then
+			return resolved
+		end
+	end
+	if state.plotPinned and state.plotPinned.Parent and state.plotPinned:IsA("BasePart") then
+		return state.plotPinned
+	end
+
+	local origin = getOrigin()
+	local best, bestScore = nil, math.huge
+	local seen = {}
+
+	local function consider(instance, force)
+		local part = plotPartFrom(instance)
+		if not part or seen[part] or not isPlotSized(part) then return end
+		seen[part] = true
+		local offset = part.Position - origin
+		local horizontal = Vector2.new(offset.X, offset.Z).Magnitude
+		local vertical = math.abs(offset.Y)
+		if horizontal > CONFIG.SEARCH_RADIUS or vertical > 140 then return end
+
+		local score = horizontal
+		if force then score = score - 500 end
+		if nameScore(part) > 0 then score = score - 60 end
+		if belongsToLocalPlayer(part) then score = score - 30 end
+		local hint = CONFIG.PLOT_SIZE_HINT
+		score = score + math.abs(part.Size.X - hint.X) * 0.1 + math.abs(part.Size.Z - hint.Z) * 0.1
+		if score < bestScore then
+			bestScore = score
+			best = part
+		end
+	end
+
+	for _, tag in ipairs(CONFIG.PLOT_TAGS) do
+		local ok, tagged = pcall(function() return CollectionService:GetTagged(tag) end)
+		if ok then
+			for _, instance in ipairs(tagged) do consider(instance, true) end
+		end
+	end
+
+	local descendants = workspace:GetDescendants()
+	for _, instance in ipairs(descendants) do
+		if instance:IsA("BasePart") and not isGenerated(instance) then
+			local attribute = instance:GetAttribute("BuildPlot") or instance:GetAttribute("PlotId")
+			consider(instance, attribute ~= nil)
+		end
+	end
+
+	if not best then
+		-- Raycast fallback: cast down, then walk up looking for a plot-sized part.
+		local result = workspace:Raycast(origin, Vector3.new(0, -250, 0), rayParams)
+		if result then
+			local node = result.Instance
+			for _ = 1, 8 do
+				if node and isPlotSized(node) then best = node break end
+				node = node and node.Parent
+			end
+		end
+	end
+
+	if not best and state.blueprint and state.blueprint.plot
+		and state.blueprint.plot.Parent and state.blueprint.plot:IsA("BasePart") then
+		best = state.blueprint.plot
+	end
+	return best
+end
+
+local function pinPlotFromCharacter()
+	local origin = getOrigin()
+	local best, bestScore = nil, -math.huge
+	for _, part in ipairs(workspace:GetDescendants()) do
+		if part:IsA("BasePart") and part.Parent and not isGenerated(part) and isPlotSized(part) then
+			local rel = part.CFrame:PointToObjectSpace(origin)
+			local horizontal = math.abs(rel.X) <= part.Size.X / 2 + 8
+				and math.abs(rel.Z) <= part.Size.Z / 2 + 8
+			local topDistance = rel.Y - part.Size.Y / 2
+			if horizontal and topDistance > -4 and topDistance < 120 then
+				-- Exact baseplate size wins, then a tagged/named/owned plot, then
+				-- lower and wider candidates. This avoids pinning a wide build floor.
+				local score = -topDistance * 0.25 + part.Size.X * part.Size.Z * 0.001
+				if nameScore(part) > 0 then score = score + 40 end
+				if belongsToLocalPlayer(part) then score = score + 70 end
+				local hint = CONFIG.PLOT_SIZE_HINT
+				local signatureMatch = math.abs(part.Size.X - hint.X) < 12
+					and math.abs(part.Size.Z - hint.Z) < 12
+				if signatureMatch then score = score + 120 end
+				if score > bestScore then
+					bestScore = score
+					best = part
+				end
+			end
+		end
+	end
+	if best then
+		state.plotPinned = best
+		notify(("Plot pinned: %s"):format(best.Name), "ok")
+	else
+		notify("No plot under you. Stand on the baseplate and press SET again.", "warn")
+	end
+	refreshUI()
+end
+
+-- ============================= CAPTURE =============================
+-- Capture works in payloads, not loose BaseParts. A payload is the nearest
+-- block/build Model for a selected part, or the part itself when no Model wraps
+-- it. That keeps block-level attributes, tags, Value/Configuration objects,
+-- scripts and existing joints together as one buildable unit.
+
+local JOINT_CLASSES = {
+	Weld = true,
+	WeldConstraint = true,
+	Motor6D = true,
+	HingeConstraint = true,
+	BallSocketConstraint = true,
+	PrismaticConstraint = true,
+	CylindricalConstraint = true,
+	PlaneConstraint = true,
+	RodConstraint = true,
+	RopeConstraint = true,
+	SpringConstraint = true,
+	AlignPosition = true,
+	AlignOrientation = true,
+}
+
+local function cloneInstance(source)
+	-- Respect Archivable = false during the copy, then put the source back
+	-- exactly how it was. Without this, replica blocks that opt out of cloning
+	-- silently lose their config children.
+	local changed = {}
+	if not source.Archivable then
+		source.Archivable = true
+		table.insert(changed, source)
+	end
+	for _, descendant in ipairs(source:GetDescendants()) do
+		if not descendant.Archivable then
+			descendant.Archivable = true
+			table.insert(changed, descendant)
+		end
+	end
+	local ok, clone = pcall(function() return source:Clone() end)
+	for _, instance in ipairs(changed) do
+		pcall(function() instance.Archivable = false end)
+	end
+	if not ok then return nil end
+	return clone
+end
+
+local function flattenWithRoot(root)
+	local list = { root }
+	for _, descendant in ipairs(root:GetDescendants()) do
+		table.insert(list, descendant)
+	end
+	return list
+end
+
+local function orderedBaseParts(root)
+	local parts = {}
+	if root:IsA("BasePart") then table.insert(parts, root) end
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("BasePart") then table.insert(parts, descendant) end
+	end
+	return parts
+end
+
+local function snapshotConfig(root)
+	local snapshot = {}
+	for index, instance in ipairs(flattenWithRoot(root)) do
+		local attributes = {}
+		local ok, values = pcall(function() return instance:GetAttributes() end)
+		if ok then
+			for name, value in pairs(values) do
+				attributes[name] = value
+			end
+		end
+		local tags = {}
+		local tagOK, tagList = pcall(function() return CollectionService:GetTags(instance) end)
+		if tagOK then tags = tagList end
+		local valueCount = 0
+		if instance:IsA("ValueBase") then valueCount = 1 end
+		if instance:IsA("Configuration") then valueCount = valueCount + 1 end
+		snapshot[index] = {
+			className = instance.ClassName,
+			name = instance.Name,
+			attributes = attributes,
+			tags = tags,
+			valueCount = valueCount,
+		}
+	end
+	return snapshot
+end
+
+local function configItemCount(snapshot)
+	local count = 0
+	for _, data in ipairs(snapshot) do
+		for _ in pairs(data.attributes) do count = count + 1 end
+		count = count + data.valueCount
+	end
+	return count
+end
+
+local function restoreConfig(root, snapshot)
+	if not CONFIG.KEEP_CONFIGS then return end
+	for index, instance in ipairs(flattenWithRoot(root)) do
+		local data = snapshot[index]
+		if data and data.className == instance.ClassName then
+			for name, value in pairs(data.attributes) do
+				if instance:GetAttribute(name) == nil then
+					pcall(function() instance:SetAttribute(name, value) end)
+				end
+			end
+			for _, tag in ipairs(data.tags) do
+				pcall(function() CollectionService:AddTag(instance, tag) end)
+			end
+		end
+	end
+end
+
+local function countJoints(root)
+	local count = 0
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if JOINT_CLASSES[descendant.ClassName] then
+			count = count + 1
+		end
+	end
+	return count
+end
+
+local function findPayloadRoot(part, plot)
+	local node = part
+	for _ = 1, 10 do
+		local parent = node.Parent
+		if not parent or parent == workspace or parent == game then break end
+		if parent:IsA("Model") then
+			-- Never capture a container that includes the plot itself.
+			if parent == plot or plot:IsDescendantOf(parent) or isGenerated(parent) then
+				return part
+			end
+			return parent
+		end
+		if parent:IsA("BasePart") or parent == plot or isGenerated(parent) then
+			break
+		end
+		node = parent
+	end
+	return part
+end
+
+local function insideCaptureVolume(part, plot, topOffset, margin)
+	local halfX, halfZ = plot.Size.X / 2, plot.Size.Z / 2
+	local relPoint = plot.CFrame:PointToObjectSpace(part.Position)
+	local localY = relPoint.Y - topOffset
+	local footprint = math.abs(relPoint.X) <= halfX + margin
+		and math.abs(relPoint.Z) <= halfZ + margin
+	local heightOK = localY >= -CONFIG.BELOW_PLOT_TOLERANCE
+		and localY <= CONFIG.PLOT_HEIGHT + CONFIG.ABOVE_PLOT_SLACK
+	return footprint and heightOK
+end
+
+local function prepareTemplate(template)
+	-- Keep every descendant by default. Configs often live in child Values,
+	-- Configurations, Attributes, tags or scripts attached to the block model.
+	if not CONFIG.KEEP_EFFECTS_IN_PASTE then
+		for _, descendant in ipairs(template:GetDescendants()) do
+			if descendant:IsA("ParticleEmitter") or descendant:IsA("Trail")
+				or descendant:IsA("Beam") or descendant:IsA("Fire") or descendant:IsA("Smoke") then
+				pcall(function() descendant.Enabled = false end)
+			end
+		end
+	end
+	if not CONFIG.KEEP_CONFIGS then
+		if CONFIG.STRIP_SCRIPTS_FROM_PASTE then
+			for _, descendant in ipairs(template:GetDescendants()) do
+				if descendant:IsA("Script") or descendant:IsA("LocalScript")
+					or descendant:IsA("ModuleScript") then
+					descendant:Destroy()
+				end
+			end
+		end
+	end
+	template.Archivable = true
+	return template
+end
+
+local function sanitizePastedScripts(root)
+	if CONFIG.STRIP_SCRIPTS_FROM_PASTE then
+		for _, descendant in ipairs(root:GetDescendants()) do
+			if descendant:IsA("Script") or descendant:IsA("LocalScript")
+				or descendant:IsA("ModuleScript") then
+				descendant:Destroy()
+			end
+		end
+	elseif CONFIG.DISABLE_PASTED_SCRIPTS then
+		for _, descendant in ipairs(root:GetDescendants()) do
+			if descendant:IsA("Script") or descendant:IsA("LocalScript") then
+				pcall(function() descendant.Disabled = true end)
+			end
+		end
+	end
+end
+
+local function clearPreview()
+	state.previewFolder = clearFolder(state.previewFolder)
+	state.previewActive = false
+	applyRayFilter()
+end
+
+local function captureBuild()
+	if state.pasting then
+		notify("Finish or cancel the current paste first.", "warn")
+		return
+	end
+	if state.scanning then return end
+	local plot = resolvePlot()
+	if not plot then
+		notify("No plot found. Stand on it and press SET, or set CONFIG.PLOT.", "error")
+		return
+	end
+	state.scanning = true
+	state.plot = plot
+
+	local characters = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.Character then table.insert(characters, player.Character) end
+	end
+
+	local topOffset = plot.Size.Y / 2
+	local groups, groupOrder = {}, {}
+	local selectedParts = {}
+	local selectedCount, skipped = 0, 0
+	local layerSet = {}
+
+	-- Find every selected part on the plot, then map it to its block/build Model.
+	for index, part in ipairs(workspace:GetDescendants()) do
+		if index % 500 == 0 then
+			if ui.scanButton then
+				ui.scanButton.Text = ("SCANNING... %d FOUND"):format(selectedCount)
+			end
+			task.wait()
+		end
+		if selectedCount >= CONFIG.MAX_CAPTURE then break end
+		if part:IsA("BasePart") and part ~= plot and part.Parent
+			and not isGenerated(part) and not isCharacterPart(part, characters)
+			and insideCaptureVolume(part, plot, topOffset, CONFIG.CAPTURE_MARGIN) then
+			local root = findPayloadRoot(part, plot)
+			if root == plot then root = part end
+			local group = groups[root]
+			if not group then
+				group = {
+					root = root,
+					parts = {},
+					layerSet = {},
+					config = nil,
+				}
+				groups[root] = group
+				table.insert(groupOrder, group)
+			end
+			table.insert(group.parts, part)
+			table.insert(selectedParts, part)
+			local relPoint = plot.CFrame:PointToObjectSpace(part.Position)
+			local layer = math.floor((relPoint.Y - topOffset) / CONFIG.GRID + 0.5)
+			group.layerSet[layer] = true
+			layerSet[layer] = true
+			selectedCount = selectedCount + 1
+		end
+	end
+
+	if selectedCount == 0 then
+		state.scanning = false
+		notify("Scan found 0 parts inside the plot. Pin the baseplate and scan again.", "error")
+		refreshUI()
+		return
+	end
+
+	local function containerAncestors(part)
+		local list = {}
+		local node = part.Parent
+		for _ = 1, 24 do
+			if not node or node == workspace then break end
+			if (node:IsA("Model") or node:IsA("Folder"))
+				and not plot:IsDescendantOf(node)
+				and not isGenerated(node) then
+				table.insert(list, node)
+			end
+			node = node.Parent
+		end
+		return list
+	end
+
+	local function findWholeBuildRoot(parts)
+		if not CONFIG.CAPTURE_WHOLE_BUILD_MODEL or #parts == 0 then return nil end
+		local candidates = containerAncestors(parts[1])
+		local chosen = nil
+		for _, candidate in ipairs(candidates) do
+			local containsAll = true
+			for _, part in ipairs(parts) do
+				if not part:IsDescendantOf(candidate) then
+					containsAll = false
+					break
+				end
+			end
+			if containsAll and not plot:IsDescendantOf(candidate) then
+				-- A world Model containing many plots also "contains" the build.
+				-- Accept it only if nearly all of its BaseParts are in this plot
+				-- footprint and it holds no second plot-sized plate. A shared map
+				-- container can therefore never be copied wholesale.
+				local total, inside, otherPlots = 0, 0, 0
+				for _, descendant in ipairs(candidate:GetDescendants()) do
+					if descendant:IsA("BasePart") then
+						total = total + 1
+						if descendant ~= plot and isPlotSized(descendant) then
+							otherPlots = otherPlots + 1
+						end
+						if insideCaptureVolume(descendant, plot, topOffset, CONFIG.CAPTURE_MARGIN + 8) then
+							inside = inside + 1
+						end
+					end
+				end
+				if total > 0 and total <= CONFIG.MAX_CAPTURE and otherPlots == 0
+					and inside / total >= 0.9 then
+					chosen = candidate
+				end
+			end
+		end
+		return chosen
+	end
+
+	local wholeRoot = findWholeBuildRoot(selectedParts)
+	if wholeRoot then
+		-- One authoritative payload for the craft. It keeps everything attached
+		-- and configured exactly like the source, including cross-block joints.
+		local mainGroup = {
+			root = wholeRoot,
+			parts = selectedParts,
+			layerSet = {},
+			wholeBuild = true,
+		}
+		groups = { [wholeRoot] = mainGroup }
+		groupOrder = { mainGroup }
+	end
+
+	-- If a whole-build container was not found, nearest-Model grouping can produce nested roots (an outer build Model and
+	-- a block Model inside it). Keep only the outermost payload: the outer clone
+	-- already contains the nested block and all of its configuration.
+	local function hasSelectedAncestor(root)
+		local node = root.Parent
+		for _ = 1, 20 do
+			if not node or node == workspace then return false end
+			if groups[node] then return true end
+			node = node.Parent
+		end
+		return false
+	end
+	local finalGroups = {}
+	for _, group in ipairs(groupOrder) do
+		if not hasSelectedAncestor(group.root) then
+			table.insert(finalGroups, group)
+		end
+	end
+
+	local payloads = {}
+	local sourceCount, configCount = 0, 0
+
+	for groupIndex, group in ipairs(finalGroups) do
+		local template = cloneInstance(group.root)
+		if template then
+			prepareTemplate(template)
+			-- A captured build container must never swallow the plot itself.
+			if template == plot or plot:IsDescendantOf(template) then
+				template:Destroy()
+				skipped = skipped + 1
+			else
+				local ordered = orderedBaseParts(template)
+				if #ordered > 0 then
+					local snapshot = snapshotConfig(group.root)
+					local partLayers = {}
+					local partCFrames = {}
+					local payloadLayerSet = {}
+					for _, part in ipairs(ordered) do
+						local relPoint = plot.CFrame:PointToObjectSpace(part.Position)
+						local layer = math.floor((relPoint.Y - topOffset) / CONFIG.GRID + 0.5)
+						table.insert(partLayers, layer)
+						table.insert(partCFrames, plot.CFrame:ToObjectSpace(part.CFrame))
+						payloadLayerSet[layer] = true
+						layerSet[layer] = true
+					end
+					table.insert(payloads, {
+						template = template,
+						name = group.root.Name,
+						className = group.root.ClassName,
+						partCFrames = partCFrames,
+						partLayers = partLayers,
+						layerSet = payloadLayerSet,
+						config = snapshot,
+						configCount = configItemCount(snapshot),
+						jointCount = countJoints(template),
+						partCount = #ordered,
+						selectedCount = #group.parts,
+					})
+					sourceCount = sourceCount + #ordered
+					configCount = configCount + configItemCount(snapshot)
+				else
+					template:Destroy()
+					skipped = skipped + 1
+				end
+			end
+		else
+			skipped = skipped + 1
+		end
+
+		if groupIndex % 8 == 0 then
+			if ui.scanButton then
+				ui.scanButton.Text = ("PACKAGING... %d / %d"):format(groupIndex, #finalGroups)
+			end
+			task.wait()
+		end
+	end
+
+	local layers = {}
+	for layer in pairs(layerSet) do table.insert(layers, layer) end
+	table.sort(layers)
+
+	clearPreview()
+	state.layerIndex = 1
+	state.blueprint = {
+		payloads = payloads,
+		-- Kept as an alias for UI code that counts capture units.
+		entries = payloads,
+		layers = layers,
+		plot = plot,
+		plotCFrame = plot.CFrame,
+		plotSize = plot.Size,
+		capturedAt = os.time(),
+		sourceCount = sourceCount,
+		partCount = #payloads,
+		configCount = configCount,
+		selectedCount = selectedCount,
+	}
+	state.scanning = false
+
+	if #payloads == 0 then
+		notify("Scan found parts but none could be packaged. Try SET on the plot.", "error")
+	elseif skipped > 0 then
+		notify(("Captured %d parts · %d configs · %d skipped"):format(sourceCount, configCount, skipped), "warn")
+	else
+		notify(("Captured %d parts · %d blocks · %d configs"):format(sourceCount, #payloads, configCount), "ok")
+	end
+	refreshUI()
+end
+
+-- ============================= PREVIEW =============================
+local function drawPreview(showAll)
+	clearPreview()
+	local blueprint = state.blueprint
+	if not blueprint or #blueprint.payloads == 0 then
+		notify("Scan a build before previewing.", "warn")
+		return
+	end
+	local plot = blueprint.plot
+	if not plot or not plot.Parent then
+		plot = resolvePlot()
+	end
+	if not plot then
+		notify("Plot unavailable for preview.", "error")
+		return
+	end
+
+	local folder = Instance.new("Folder")
+	folder.Name = "BuildMirror_Preview"
+	folder:SetAttribute("BuildMirrorGenerated", true)
+	folder.Parent = safeParent(CONFIG.PASTE_PARENT)
+	state.previewFolder = folder
+
+	local wantedLayer = blueprint.layers[state.layerIndex]
+	for _, payload in ipairs(blueprint.payloads) do
+		local hasLayer = showAll or payload.layerSet[wantedLayer]
+		if hasLayer then
+			local ghost = cloneInstance(payload.template)
+			if ghost then
+				-- Previews must never execute cloned configuration scripts. Disable
+				-- and position before parenting so nothing runs in the live world.
+				for _, descendant in ipairs(ghost:GetDescendants()) do
+					if descendant:IsA("Script") or descendant:IsA("LocalScript") then
+						pcall(function() descendant.Disabled = true end)
+					end
+				end
+				local parts = orderedBaseParts(ghost)
+				for index, part in ipairs(parts) do
+					local relativeCFrame = payload.partCFrames[index]
+					if relativeCFrame then
+						part.CFrame = plot.CFrame:ToWorldSpace(relativeCFrame)
+					end
+					local visible = showAll or payload.partLayers[index] == wantedLayer
+					part.Anchored = true
+					part.CanCollide = false
+					part.CanTouch = false
+					part.CanQuery = false
+					part.CastShadow = false
+					if visible then
+						part.Transparency = math.max(part.Transparency, CONFIG.PREVIEW_TRANSPARENCY)
+						part.Color = Color3.fromRGB(196, 255, 61)
+					else
+						part.Transparency = 1
+					end
+				end
+				ghost.Parent = folder
+			end
+		end
+	end
+	state.previewActive = true
+	state.previewLayerOnly = not showAll
+	applyRayFilter()
+	notify(showAll and "Ghost preview: all layers" or "Ghost preview: current layer", "info")
+	refreshUI()
+end
+
+local function previewCurrentLayer()
+	if state.previewActive and state.previewLayerOnly then
+		clearPreview()
+		notify("Ghost preview hidden.", "info")
+		refreshUI()
+	else
+		drawPreview(false)
+	end
+end
+
+-- ============================== PASTE ==============================
+local function resolvePastePlot()
+	local blueprint = state.blueprint
+	local scanned = blueprint and blueprint.plot
+	if CONFIG.PASTE_TARGET == "SCANNED_PLOT" and scanned and scanned.Parent
+		and scanned:IsA("BasePart") then
+		return scanned
+	end
+	if CONFIG.PLOT and CONFIG.PLOT.Parent and CONFIG.PLOT:IsA("BasePart") then
+		return CONFIG.PLOT
+	end
+	if type(CONFIG.PLOT_RESOLVER) == "function" then
+		local ok, resolved = pcall(CONFIG.PLOT_RESOLVER)
+		if ok and resolved and resolved:IsA("BasePart") and resolved.Parent then
+			return resolved
+		end
+	end
+	if state.plotPinned and state.plotPinned.Parent and state.plotPinned:IsA("BasePart") then
+		return state.plotPinned
+	end
+	local localPlot = resolvePlot()
+	if localPlot and localPlot.Parent then return localPlot end
+	if scanned and scanned.Parent and scanned:IsA("BasePart") then
+		return scanned
+	end
+	return resolvePlot()
+end
+
+local function primaryPartOf(instance)
+	if instance:IsA("BasePart") then return instance end
+	if instance:IsA("Model") then
+		return instance.PrimaryPart or instance:FindFirstChildWhichIsA("BasePart", true)
+	end
+	return instance:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function collectBaseParts(root)
+	local parts = {}
+	if root:IsA("BasePart") then table.insert(parts, root) end
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("BasePart") then table.insert(parts, descendant) end
+	end
+	return parts
+end
+
+local function jointedPartSet(root)
+	local set = {}
+	local function add(part)
+		if part and part:IsA("BasePart") then set[part] = true end
+	end
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("Weld") or descendant:IsA("WeldConstraint")
+			or descendant:IsA("Motor6D") then
+			add(descendant.Part0)
+			add(descendant.Part1)
+		elseif JOINT_CLASSES[descendant.ClassName] then
+			local okA, attachmentA = pcall(function() return descendant.Attachment0 end)
+			local okB, attachmentB = pcall(function() return descendant.Attachment1 end)
+			if okA and attachmentA then add(attachmentA.Parent) end
+			if okB and attachmentB then add(attachmentB.Parent) end
+		end
+	end
+	return set
+end
+
+local function localAssemblyBounds(plot, parts)
+	local halfOffset = plot.Size.Y / 2
+	local bounds = {
+		minX = math.huge, maxX = -math.huge,
+		minY = math.huge, maxY = -math.huge,
+		minZ = math.huge, maxZ = -math.huge,
+	}
+	for _, part in ipairs(parts) do
+		if part.Parent then
+			local localCF = plot.CFrame:ToObjectSpace(part.CFrame)
+			local right, up, look = localCF.RightVector, localCF.UpVector, localCF.LookVector
+			local sx, sy, sz = part.Size.X / 2, part.Size.Y / 2, part.Size.Z / 2
+			local hx = math.abs(right.X) * sx + math.abs(up.X) * sy + math.abs(look.X) * sz
+			local hy = math.abs(right.Y) * sx + math.abs(up.Y) * sy + math.abs(look.Y) * sz
+			local hz = math.abs(right.Z) * sx + math.abs(up.Z) * sy + math.abs(look.Z) * sz
+			local center = localCF.Position
+			local cy = center.Y - halfOffset
+			bounds.minX = math.min(bounds.minX, center.X - hx)
+			bounds.maxX = math.max(bounds.maxX, center.X + hx)
+			bounds.minY = math.min(bounds.minY, cy - hy)
+			bounds.maxY = math.max(bounds.maxY, cy + hy)
+			bounds.minZ = math.min(bounds.minZ, center.Z - hz)
+			bounds.maxZ = math.max(bounds.maxZ, center.Z + hz)
+		end
+	end
+	return bounds
+end
+
+local function computeFitShift(plot, bounds)
+	local margin = CONFIG.PASTE_MARGIN
+	local halfX = math.max(0, plot.Size.X / 2 - margin)
+	local halfZ = math.max(0, plot.Size.Z / 2 - margin)
+	local minAllowedY = -CONFIG.BELOW_PLOT_TOLERANCE
+	local maxAllowedY = CONFIG.PLOT_HEIGHT
+
+	local widthX = bounds.maxX - bounds.minX
+	local widthY = bounds.maxY - bounds.minY
+	local widthZ = bounds.maxZ - bounds.minZ
+
+	local shiftX = 0
+	if widthX <= halfX * 2 then
+		if bounds.maxX > halfX then
+			shiftX = halfX - bounds.maxX
+		elseif bounds.minX < -halfX then
+			shiftX = -halfX - bounds.minX
+		end
+	else
+		shiftX = -(bounds.minX + bounds.maxX) / 2
+	end
+
+	local shiftZ = 0
+	if widthZ <= halfZ * 2 then
+		if bounds.maxZ > halfZ then
+			shiftZ = halfZ - bounds.maxZ
+		elseif bounds.minZ < -halfZ then
+			shiftZ = -halfZ - bounds.minZ
+		end
+	else
+		shiftZ = -(bounds.minZ + bounds.maxZ) / 2
+	end
+
+	local shiftY = 0
+	if bounds.minY < minAllowedY then
+		shiftY = minAllowedY - bounds.minY
+	end
+	if bounds.maxY + shiftY > maxAllowedY then
+		if widthY <= maxAllowedY - minAllowedY then
+			shiftY = maxAllowedY - bounds.maxY
+		else
+			shiftY = minAllowedY - bounds.minY
+		end
+	end
+
+	return Vector3.new(shiftX, shiftY, shiftZ), {
+		x = widthX > halfX * 2,
+		y = widthY > maxAllowedY - minAllowedY,
+		z = widthZ > halfZ * 2,
+		widthX = widthX,
+		widthY = widthY,
+		widthZ = widthZ,
+	}
+end
+
+local function clearPasted(quiet)
+	state.pasteToken = state.pasteToken + 1
+	if state.pastedFolder then
+		state.pastedFolder:Destroy()
+	end
+	state.pastedFolder = nil
+	state.pastedRoot = nil
+	state.pastedParts = {}
+	state.pastedFrozen = true
+	applyRayFilter()
+	refreshUI()
+	if not quiet then
+		notify("Cleared the local pasted build.", "info")
+	end
+end
+
+local function pasteAll()
+	if state.pasting then
+		state.cancelPaste = true
+		notify("Cancelling paste...", "warn")
+		return
+	end
+	local blueprint = state.blueprint
+	if not blueprint or #blueprint.payloads == 0 or blueprint.sourceCount == 0 then
+		notify("Nothing captured. Run 1 · SCAN BUILD first.", "warn")
+		return
+	end
+	local plot = resolvePastePlot()
+	if not plot or not plot.Parent then
+		notify("No destination plot. Stand on yours and press SET, then paste.", "error")
+		return
+	end
+
+	clearPreview()
+	clearPasted(true)
+	state.pasting = true
+	state.cancelPaste = false
+	state.pasteToken = state.pasteToken + 1
+	local token = state.pasteToken
+
+	local assembly = Instance.new("Model")
+	assembly.Name = "BuildMirror_Pasted"
+	assembly:SetAttribute("BuildMirrorGenerated", true)
+	assembly:SetAttribute("BuildMirrorSourceCount", blueprint.sourceCount)
+	assembly:SetAttribute("BuildMirrorConfigCount", blueprint.configCount)
+	assembly:SetAttribute("BuildMirrorCreatedAt", blueprint.capturedAt)
+	assembly:SetAttribute("BuildMirrorPlot", plot.Name)
+	-- Deliberately keep the assembly unparented until every payload is cloned,
+	-- fitted and welded. Cloned config scripts then start once, at final position.
+	state.pastedFolder = assembly
+	state.pastedParts = {}
+
+	notify(("Building all %d parts into %s"):format(blueprint.sourceCount, plot.Name), "info")
+
+	local createdParts, payloadCopies = {}, {}
+	local restoredConfigs, failed, skippedHooks = 0, 0, 0
+
+	for index, payload in ipairs(blueprint.payloads) do
+		if token ~= state.pasteToken or state.cancelPaste then break end
+
+		local clone = cloneInstance(payload.template)
+		if clone then
+			-- Restore tags/config before sanitising, then freeze and position. This
+			-- keeps cloned config scripts from executing against CFrame 0,0,0.
+			restoreConfig(clone, payload.config)
+			restoredConfigs = restoredConfigs + payload.configCount
+			sanitizePastedScripts(clone)
+			local clonedParts = orderedBaseParts(clone)
+			for partIndex, part in ipairs(clonedParts) do
+				local relativeCFrame = payload.partCFrames[partIndex]
+				if relativeCFrame then
+					part.CFrame = plot.CFrame:ToWorldSpace(relativeCFrame)
+				end
+			end
+
+			clone.Parent = assembly
+
+			local payloadParts = collectBaseParts(clone)
+			for _, part in ipairs(payloadParts) do
+				part.Anchored = true
+				if type(CONFIG.ON_PASTE_COMMIT) == "function" then
+					local hookOK, keep = pcall(CONFIG.ON_PASTE_COMMIT, part, payload, plot)
+					if not hookOK or keep == false then
+						skippedHooks = skippedHooks + 1
+						if clone:IsA("Model") and clone.PrimaryPart == part then
+							clone.PrimaryPart = nil
+						end
+						part:Destroy()
+					else
+						table.insert(createdParts, part)
+					end
+				else
+					table.insert(createdParts, part)
+				end
+			end
+
+			local primary = primaryPartOf(clone)
+			if primary and primary.Parent then
+				table.insert(payloadCopies, {
+					root = clone,
+					primary = primary,
+					parts = collectBaseParts(clone),
+					jointCount = payload.jointCount,
+					name = payload.name,
+				})
+			elseif clone.Parent then
+				clone:Destroy()
+				failed = failed + 1
+			end
+		else
+			failed = failed + 1
+		end
+
+		local percent = math.floor((index / #blueprint.payloads) * 100)
+		if index % CONFIG.PASTE_BATCH == 0 or index == #blueprint.payloads then
+			refreshUI()
+			if ui.pasteButton then
+				ui.pasteButton.Text = ("PASTING %d%% · TAP TO CANCEL"):format(percent)
+			end
+			task.wait()
+		end
+	end
+
+	local canceled = state.cancelPaste or token ~= state.pasteToken
+	if canceled then
+		assembly:Destroy()
+		state.pastedFolder = nil
+		state.pastedRoot = nil
+		state.pastedParts = {}
+		state.pasting = false
+		state.cancelPaste = false
+		applyRayFilter()
+		refreshUI()
+		notify("Paste canceled. Generated build removed.", "warn")
+		return
+	end
+
+	-- Recompute from real cloned geometry, then translate the ENTIRE assembly
+	-- into the destination plot. This is the fix for "only some parts pasted":
+	-- no part is rejected for crossing an edge, the whole build is fitted.
+	local fitOverflow = nil
+	if CONFIG.FIT_WHOLE_BUILD_TO_PLOT and #createdParts > 0 then
+		local bounds = localAssemblyBounds(plot, createdParts)
+		local shift, overflow = computeFitShift(plot, bounds)
+		if math.abs(shift.X) > 0.001 or math.abs(shift.Y) > 0.001 or math.abs(shift.Z) > 0.001 then
+			assembly:PivotTo(assembly:GetPivot() + plot.CFrame:VectorToWorldSpace(shift))
+		end
+		fitOverflow = overflow
+		assembly:SetAttribute("BuildMirrorShiftX", shift.X)
+		assembly:SetAttribute("BuildMirrorShiftY", shift.Y)
+		assembly:SetAttribute("BuildMirrorShiftZ", shift.Z)
+	end
+
+	-- Weld each payload root to the assembly, but preserve joints inside a block
+	-- payload so motors/hinges keep their configuration and movement.
+	local assemblyRoot = nil
+	local weldCount = 0
+	for _, payloadCopy in ipairs(payloadCopies) do
+		if payloadCopy.root.Parent and #payloadCopy.parts > 0 then
+			local jointed = nil
+			if CONFIG.PRESERVE_EXISTING_JOINTS and payloadCopy.jointCount > 0 then
+				jointed = jointedPartSet(payloadCopy.root)
+			end
+			-- Anchor on a part that is not already driven by a config joint. This
+			-- keeps motors/hinges free while still connecting loose shell parts.
+			local rigidRoot = payloadCopy.primary
+			if jointed then
+				for _, part in ipairs(payloadCopy.parts) do
+					if part.Parent and not jointed[part] then
+						rigidRoot = part
+						break
+					end
+				end
+			end
+			if not assemblyRoot then assemblyRoot = rigidRoot end
+			for _, part in ipairs(payloadCopy.parts) do
+				if part ~= rigidRoot and part.Parent and not (jointed and jointed[part]) then
+					local weldOK = pcall(function()
+						local weld = Instance.new("WeldConstraint")
+						weld.Name = "BuildMirrorWeld"
+						weld.Part0 = rigidRoot
+						weld.Part1 = part
+						weld.Parent = rigidRoot
+					end)
+					if weldOK then weldCount = weldCount + 1 end
+				end
+			end
+			if assemblyRoot and rigidRoot ~= assemblyRoot and rigidRoot.Parent then
+				local weldOK = pcall(function()
+					local weld = Instance.new("WeldConstraint")
+					weld.Name = "BuildMirrorAssemblyWeld"
+					weld.Part0 = assemblyRoot
+					weld.Part1 = rigidRoot
+					weld.Parent = assemblyRoot
+				end)
+				if weldOK then weldCount = weldCount + 1 end
+			end
+		end
+	end
+
+	if not assemblyRoot then assemblyRoot = createdParts[1] end
+	if assemblyRoot and CONFIG.WELD_PASTE_TO_PLOT and plot:IsA("BasePart") then
+		local plotWeldOK = pcall(function()
+			local weld = Instance.new("WeldConstraint")
+			weld.Name = "BuildMirrorPlotWeld"
+			weld.Part0 = plot
+			weld.Part1 = assemblyRoot
+			weld.Parent = assemblyRoot
+		end)
+		if plotWeldOK then weldCount = weldCount + 1 end
+	end
+
+	if #createdParts == 0 or not assemblyRoot then
+		assembly:Destroy()
+		state.pastedFolder = nil
+		state.pastedRoot = nil
+		state.pastedParts = {}
+		state.pasting = false
+		applyRayFilter()
+		refreshUI()
+		notify("Paste created 0 parts. Pin your plot and scan again.", "error")
+		return
+	end
+
+	state.pastedRoot = assemblyRoot
+	state.pastedParts = collectBaseParts(assembly)
+	state.pastedFrozen = CONFIG.FREEZE_AFTER_PASTE
+	for _, part in ipairs(state.pastedParts) do
+		part.Anchored = state.pastedFrozen
+	end
+	assembly:SetAttribute("BuildMirrorParts", #state.pastedParts)
+	assembly:SetAttribute("BuildMirrorBlocks", #payloadCopies)
+	assembly:SetAttribute("BuildMirrorFrozen", state.pastedFrozen)
+	assembly.Parent = safeParent(CONFIG.PASTE_PARENT)
+	applyRayFilter()
+
+	local overflowNote = ""
+	if fitOverflow and (fitOverflow.x or fitOverflow.y or fitOverflow.z) then
+		overflowNote = " · oversized, all kept"
+	end
+	local failNote = (failed > 0 or skippedHooks > 0)
+		and (" · %d failed"):format(failed + skippedHooks)
+		or ""
+
+	notify(("PASTED %d parts · %d blocks · %d configs · %d welds%s%s"):format(
+		#state.pastedParts,
+		#payloadCopies,
+		restoredConfigs,
+		weldCount,
+		overflowNote,
+		failNote
+	), (fitOverflow and (fitOverflow.x or fitOverflow.y or fitOverflow.z)) and "warn" or "ok")
+	if fitOverflow and (fitOverflow.x or fitOverflow.y or fitOverflow.z) then
+		notify("Assembly is wider/taller than the plot. It was kept whole, not cropped.", "warn")
+	end
+
+	state.pasting = false
+	applyRayFilter()
+	refreshUI()
+end
+
+local function togglePasteFreeze()
+	local assembly = state.pastedFolder
+	if not assembly or not assembly.Parent or #state.pastedParts == 0 then
+		notify("Paste something before freezing it.", "warn")
+		return
+	elseif state.pasting then
+		notify("Wait for the paste to finish.", "warn")
+		return
+	end
+	state.pastedFrozen = not state.pastedFrozen
+	state.pastedParts = collectBaseParts(assembly)
+	for _, part in ipairs(state.pastedParts) do
+		part.Anchored = state.pastedFrozen
+	end
+	assembly:SetAttribute("BuildMirrorFrozen", state.pastedFrozen)
+	CONFIG.FREEZE_AFTER_PASTE = state.pastedFrozen
+	notify(state.pastedFrozen and "Pasted build frozen." or "Pasted build released to physics.", "info")
+	refreshUI()
+end
+
+-- ============================= JETPACK ============================
+local function findDescendant(parent, name)
+	for _, child in ipairs(parent:GetDescendants()) do
+		if child.Name == name then return child end
+	end
+	return nil
+end
+
+local function getJetpackTemplate()
+	if CONFIG.JETPACK_TEMPLATE and CONFIG.JETPACK_TEMPLATE.Parent then
+		return CONFIG.JETPACK_TEMPLATE
+	end
+	local existing = ReplicatedStorage:FindFirstChild("Jetpack")
+	if existing then return existing end
+	local ok, waited = pcall(function()
+		return ReplicatedStorage:WaitForChild("Jetpack", 3)
+	end)
+	return ok and waited or nil
+end
+
+local function spawnJetpack()
+	local template = getJetpackTemplate()
+	if not template then
+		notify("No ReplicatedStorage.Jetpack asset. Add one or use CONFIG.JETPACK_TEMPLATE.", "warn")
+		return false
+	end
+	if not hrp or not hum then
+		notify("Character not ready.", "warn")
+		return false
+	end
+	local ok, clone = pcall(function() return template:Clone() end)
+	if not ok or not clone then
+		notify("Jetpack template could not be cloned.", "error")
+		return false
+	end
+
+	clone.Parent = safeParent(CONFIG.PASTE_PARENT)
+	state.jetpackClone = clone
+	local model = clone:IsA("Model") and clone or findDescendant(clone, "Jetpack")
+	if not model or not model:IsA("Model") then
+		model = clone:FindFirstChildWhichIsA("Model", true) or clone
+	end
+	state.jetpackModel = model
+
+	-- Template rigs vary. Do not assume Script > Jetpack > FirePart like v1 did.
+	local baseParts = {}
+	for _, instance in ipairs(clone:GetDescendants()) do
+		if instance:IsA("BasePart") then
+			instance.Transparency = 0
+			instance.CanCollide = false
+			instance.Anchored = false
+			instance.Massless = true
+			instance.CanTouch = false
+			table.insert(baseParts, instance)
+		end
+		if instance.Name == "FirePart" then
+			table.insert(state.fireParts, instance)
+		end
+		-- A cloned jetpack visual must never run the template's gameplay scripts.
+		if instance:IsA("Script") or instance:IsA("LocalScript") then
+			instance.Disabled = true
+		end
+	end
+
+	local primary = (model:IsA("Model") and model.PrimaryPart) or baseParts[1]
+	if not primary then
+		clone:Destroy()
+		state.jetpackClone = nil
+		notify("Jetpack has no BasePart to attach.", "error")
+		return false
+	end
+
+	if model:IsA("Model") and not model.PrimaryPart then
+		model.PrimaryPart = primary
+	end
+	if model:IsA("Model") then
+		model:PivotTo(hrp.CFrame * CFrame.new(0, 0.25, 0.9))
+	else
+		primary.CFrame = hrp.CFrame * CFrame.new(0, 0.25, 0.9)
+	end
+
+	local weld = Instance.new("WeldConstraint")
+	weld.Name = "BuildMirrorJetpackWeld"
+	weld.Part0 = hrp
+	weld.Part1 = primary
+	weld.Parent = hrp
+
+	local animationName = hum.RigType == Enum.HumanoidRigType.R6 and "Idle" or "IdleR15"
+	local animation = findDescendant(clone, animationName) or findDescendant(clone, "Idle")
+	if animation and not animation:IsA("Animation") then animation = nil end
+	if animation and animator then
+		local loaded, track = pcall(function() return animator:LoadAnimation(animation) end)
+		if loaded then state.idleTrack = track end
+	end
+
+	for _, firePart in ipairs(state.fireParts) do
+		for _, child in ipairs(firePart:GetDescendants()) do
+			if child:IsA("ParticleEmitter") or child:IsA("Light") then
+				child.Enabled = false
+			end
+		end
+	end
+	return true
+end
+
+local function setJetpackFire(enabled)
+	for _, firePart in ipairs(state.fireParts) do
+		for _, child in ipairs(firePart:GetDescendants()) do
+			if child:IsA("ParticleEmitter") or child:IsA("Light") then
+				child.Enabled = enabled
+			end
+		end
+	end
+end
+
+local function ensureFlyVelocity()
+	if not hrp then return end
+	if state.flyAttachment and state.flyAttachment.Parent and state.flyVelocity then
+		return
+	end
+	state.flyAttachment = Instance.new("Attachment")
+	state.flyAttachment.Name = "BuildMirrorFlyAttachment"
+	state.flyAttachment.Parent = hrp
+	state.flyVelocity = Instance.new("LinearVelocity")
+	state.flyVelocity.Name = "BuildMirrorFlyVelocity"
+	state.flyVelocity.Attachment0 = state.flyAttachment
+	state.flyVelocity.RelativeTo = Enum.ActuatorRelativeTo.World
+	state.flyVelocity.VelocityConstraintMode = Enum.VelocityConstraintMode.Line
+	state.flyVelocity.LineDirection = Vector3.new(0, 1, 0)
+	state.flyVelocity.LineVelocity = 0
+	state.flyVelocity.MaxForce = 1e6
+	state.flyVelocity.Parent = state.flyAttachment
+end
+
+local function toggleJetpack()
+	if state.unloaded then return end
+	if state.jetpackEnabled then
+		state.jetpackEnabled = false
+		stopJetpackVisuals()
+		notify("Jetpack off.", "info")
+		refreshUI()
+		return
+	end
+	if not hrp or not hum then
+		notify("Spawn your character before enabling the jetpack.", "warn")
+		return
+	end
+	if not spawnJetpack() then return end
+	state.jetpackEnabled = true
+	notify("Jetpack on. Hold E up / Q down.", "ok")
+	refreshUI()
+end
+
+local function updateJetpack(dt)
+	if not state.jetpackEnabled or not hrp or not hum or not hrp.Parent then return end
+	local origin = hrp.Position
+	local longRay = workspace:Raycast(origin, Vector3.new(0, -1000, 0), rayParams)
+	local groundRay = workspace:Raycast(origin, Vector3.new(0, -2.5, 0), rayParams)
+	local distance = longRay and (origin.Y - longRay.Position.Y) or math.huge
+
+	local wantFly = state.upPressed or state.downPressed or distance > CONFIG.JETPACK_HOVER_MIN
+	if distance <= CONFIG.JETPACK_HOVER_MIN and not state.upPressed then
+		wantFly = false
+	end
+	if not wantFly then
+		if state.flyVelocity then state.flyVelocity.Enabled = false end
+		setJetpackFire(false)
+		if state.idleTrack and state.idleTrack.IsPlaying then state.idleTrack:Stop() end
+		state.verticalSpeed = 0
+		return
+	end
+
+	ensureFlyVelocity()
+	if not state.flyVelocity then return end
+	state.flyVelocity.Enabled = true
+	setJetpackFire(true)
+	if state.idleTrack and not state.idleTrack.IsPlaying then state.idleTrack:Play() end
+
+	local target = 0
+	if state.upPressed then target = CONFIG.JETPACK_MAX_SPEED
+	elseif state.downPressed then target = -CONFIG.JETPACK_MAX_SPEED end
+	local alpha = math.clamp(dt * 12, 0.05, 1)
+	state.verticalSpeed = state.verticalSpeed
+		+ (target - state.verticalSpeed) * math.clamp(CONFIG.JETPACK_EASING + alpha * 0.1, 0, 1)
+	state.flyVelocity.LineVelocity = state.verticalSpeed
+end
+
+local function toggleSpeed()
+	state.fast = not state.fast
+	if hum and hum.Parent then
+		hum.WalkSpeed = state.fast and CONFIG.SPEED_FAST or CONFIG.SPEED_DEFAULT
+	end
+	notify(state.fast and "WalkSpeed: 100" or "WalkSpeed: 16", "info")
+	refreshUI()
+end
+
+-- =============================== UI ===============================
+local notifyLines = {}
+
+local function makeInstance(className, properties, parent)
+	local instance = Instance.new(className)
+	for key, value in pairs(properties or {}) do
+		instance[key] = value
+	end
+	if parent then instance.Parent = parent end
+	return instance
+end
+
+local function createUI()
+	local guiNames = { CONFIG.UI_NAME, "BuildMirror_v2", "BuildMirror_v21" }
+	local playerGui = lp:FindFirstChild("PlayerGui")
+	if playerGui then
+		for _, guiName in ipairs(guiNames) do
+			local old = playerGui:FindFirstChild(guiName)
+			if old then old:Destroy() end
+		end
+	end
+	pcall(function()
+		local core = game:GetService("CoreGui")
+		for _, guiName in ipairs(guiNames) do
+			local oldUI = core:FindFirstChild(guiName)
+			if oldUI then oldUI:Destroy() end
+		end
+	end)
+
+	local screenGui
+	local ok, coreGui = pcall(function() return game:GetService("CoreGui") end)
+	if ok and coreGui then
+		local created, result = pcall(function()
+			local gui = Instance.new("ScreenGui")
+			gui.Name = CONFIG.UI_NAME
+			gui.ResetOnSpawn = false
+			gui.IgnoreGuiInset = true
+			gui.DisplayOrder = 999
+			gui.Parent = coreGui
+			return gui
+		end)
+		if created then screenGui = result end
+	end
+	if not screenGui then
+		screenGui = Instance.new("ScreenGui")
+		screenGui.Name = CONFIG.UI_NAME
+		screenGui.ResetOnSpawn = false
+		screenGui.IgnoreGuiInset = true
+		screenGui.DisplayOrder = 999
+		screenGui.Parent = lp:WaitForChild("PlayerGui")
+	end
+	ui.screenGui = screenGui
+
+	local main = makeInstance("Frame", {
+		Name = "Main",
+		Size = UDim2.fromOffset(254, 574),
+		Position = UDim2.fromOffset(26, 84),
+		BackgroundColor3 = COLORS.bg,
+		BorderSizePixel = 0,
+		Active = true,
+	}, screenGui)
+	ui.main = main
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 12) }, main)
+	makeInstance("UIStroke", { Color = COLORS.stroke, Thickness = 1 }, main)
+
+	local accent = makeInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 3),
+		BackgroundColor3 = COLORS.lime,
+		BorderSizePixel = 0,
+	}, main)
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 12) }, accent)
+
+	local title = makeInstance("TextLabel", {
+		Size = UDim2.new(1, -20, 0, 42),
+		Position = UDim2.fromOffset(14, 3),
+		BackgroundTransparency = 1,
+		Text = "BUILD MIRROR",
+		TextColor3 = COLORS.text,
+		TextSize = 16,
+		Font = Enum.Font.GothamBold,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, main)
+	ui.title = title
+
+	local subtitle = makeInstance("TextLabel", {
+		Size = UDim2.new(1, -72, 0, 42),
+		Position = UDim2.fromOffset(14, 22),
+		BackgroundTransparency = 1,
+		Text = "whole build · configs kept",
+		TextColor3 = COLORS.dim,
+		TextSize = 10,
+		Font = Enum.Font.Code,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, main)
+	ui.subtitle = subtitle
+
+	local version = makeInstance("TextLabel", {
+		Size = UDim2.fromOffset(40, 16),
+		Position = UDim2.new(1, -80, 0, 13),
+		BackgroundColor3 = COLORS.panel2,
+		Text = "v2.1",
+		TextColor3 = COLORS.lime,
+		TextSize = 10,
+		Font = Enum.Font.Code,
+	}, main)
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 4) }, version)
+
+	local collapse = makeInstance("TextButton", {
+		Size = UDim2.fromOffset(24, 22),
+		Position = UDim2.new(1, -30, 0, 10),
+		BackgroundColor3 = COLORS.panel2,
+		Text = "_",
+		TextColor3 = COLORS.dim,
+		TextSize = 14,
+		Font = Enum.Font.GothamBold,
+		AutoButtonColor = true,
+	}, main)
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 5) }, collapse)
+	collapse.ZIndex = 3
+	ui.collapse = collapse
+
+	-- A transparent header hit-area drags reliably even though TextLabels do not
+	-- consistently receive mouse/touch input.
+	local dragRegion = makeInstance("TextButton", {
+		Size = UDim2.new(1, -38, 0, 38),
+		Position = UDim2.fromOffset(0, 0),
+		BackgroundTransparency = 1,
+		Text = "",
+		AutoButtonColor = false,
+		ZIndex = 2,
+	}, main)
+	ui.dragRegion = dragRegion
+
+	local body = makeInstance("Frame", {
+		Name = "Body",
+		Size = UDim2.new(1, -20, 1, -53),
+		Position = UDim2.fromOffset(10, 48),
+		BackgroundTransparency = 1,
+	}, main)
+	ui.body = body
+	local layout = makeInstance("UIListLayout", {
+		Padding = UDim.new(0, 6),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, body)
+	makeInstance("UIPadding", {
+		PaddingLeft = UDim.new(0, 2),
+		PaddingRight = UDim.new(0, 2),
+		PaddingBottom = UDim.new(0, 2),
+	}, body)
+
+	local order = 0
+	local function nextOrder()
+		order = order + 1
+		return order
+	end
+
+	local target = makeInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 46),
+		BackgroundColor3 = COLORS.panel,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(),
+	}, body)
+	ui.targetCard = target
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 8) }, target)
+	makeInstance("UIStroke", { Color = COLORS.stroke, Thickness = 1 }, target)
+	local targetDot = makeInstance("Frame", {
+		Size = UDim2.fromOffset(6, 6),
+		Position = UDim2.fromOffset(10, 12),
+		BackgroundColor3 = COLORS.amber,
+		BorderSizePixel = 0,
+	}, target)
+	makeInstance("UICorner", { CornerRadius = UDim.new(1, 0) }, targetDot)
+	ui.targetDot = targetDot
+	makeInstance("TextLabel", {
+		Size = UDim2.new(1, -28, 0, 12),
+		Position = UDim2.fromOffset(22, 9),
+		BackgroundTransparency = 1,
+		Text = "TARGET PLOT · CONFIGS ON",
+		TextColor3 = COLORS.dim,
+		TextSize = 9,
+		Font = Enum.Font.Code,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, target)
+	ui.plotLabel = makeInstance("TextLabel", {
+		Size = UDim2.new(1, -58, 0, 24),
+		Position = UDim2.fromOffset(10, 19),
+		BackgroundTransparency = 1,
+		Text = "Scan to detect your 51×51 build plot",
+		TextColor3 = COLORS.text,
+		TextSize = 12,
+		Font = Enum.Font.Gotham,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+	}, target)
+	ui.pinPlotButton = makeInstance("TextButton", {
+		Size = UDim2.fromOffset(34, 20),
+		Position = UDim2.new(1, -42, 0, 8),
+		BackgroundColor3 = COLORS.panel2,
+		Text = "SET",
+		TextColor3 = COLORS.lime,
+		TextSize = 9,
+		Font = Enum.Font.Code,
+		BorderSizePixel = 0,
+		AutoButtonColor = true,
+	}, target)
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 5) }, ui.pinPlotButton)
+	makeInstance("UIStroke", { Color = COLORS.stroke, Thickness = 1 }, ui.pinPlotButton)
+
+	local function section(text)
+		return makeInstance("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 11),
+			BackgroundTransparency = 1,
+			Text = text,
+			TextColor3 = COLORS.dim,
+			TextSize = 9,
+			Font = Enum.Font.Code,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			LayoutOrder = nextOrder(),
+		}, body)
+	end
+
+	local function button(text, options)
+		local options = options or {}
+		local height = options.height or 28
+		local button = makeInstance("TextButton", {
+			Size = UDim2.new(1, 0, 0, height),
+			BackgroundColor3 = options.color or COLORS.panel2,
+			Text = text,
+			TextColor3 = options.textColor or COLORS.text,
+			TextSize = options.textSize or 11,
+			Font = Enum.Font.GothamBold,
+			BorderSizePixel = 0,
+			AutoButtonColor = true,
+			LayoutOrder = nextOrder(),
+		}, body)
+		makeInstance("UICorner", { CornerRadius = UDim.new(0, 7) }, button)
+		if options.outline then
+			makeInstance("UIStroke", { Color = options.outline, Thickness = 1 }, button)
+		end
+		return button
+	end
+
+	section("CAPTURE")
+	ui.scanButton = button("1 · SCAN BUILD", { color = COLORS.green, height = 32 })
+	ui.scanButton.TextColor3 = COLORS.text
+
+	local layerRow = makeInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 26),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(),
+	}, body)
+	makeInstance("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 5),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, layerRow)
+	local function rowButton(text, width, orderIndex, color)
+		local b = makeInstance("TextButton", {
+			Size = UDim2.new(width, 0, 1, 0),
+			LayoutOrder = orderIndex,
+			BackgroundColor3 = color or COLORS.panel2,
+			Text = text,
+			TextColor3 = COLORS.text,
+			TextSize = 11,
+			Font = Enum.Font.GothamBold,
+			BorderSizePixel = 0,
+			AutoButtonColor = true,
+		}, layerRow)
+		makeInstance("UICorner", { CornerRadius = UDim.new(0, 6) }, b)
+		return b
+	end
+	ui.layerDown = rowButton("−", 0.16, 1)
+	ui.layerLabel = makeInstance("TextLabel", {
+		Size = UDim2.new(0.64, 0, 1, 0),
+		LayoutOrder = 2,
+		BackgroundColor3 = COLORS.panel,
+		Text = "LAYER  0 / 0",
+		TextColor3 = COLORS.dim,
+		TextSize = 9,
+		Font = Enum.Font.Code,
+		BorderSizePixel = 0,
+	}, layerRow)
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 6) }, ui.layerLabel)
+	ui.layerUp = rowButton("+", 0.16, 3)
+	ui.previewButton = button("PREVIEW · CURRENT LAYER", { height = 26 })
+
+	section("PASTE · WHOLE BUILD")
+	ui.pasteButton = button("2 · SHOW ALL · PASTE", {
+		color = COLORS.lime,
+		textColor = COLORS.darkText,
+		height = 38,
+		textSize = 12,
+	})
+	ui.pasteHint = makeInstance("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 11),
+		BackgroundTransparency = 1,
+		Text = "Rebuilds every layer · welded to plot",
+		TextColor3 = COLORS.dim,
+		TextSize = 9,
+		Font = Enum.Font.Code,
+		LayoutOrder = nextOrder(),
+		TextXAlignment = Enum.TextXAlignment.Center,
+	}, body)
+	local pasteRow = makeInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 26),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(),
+	}, body)
+	makeInstance("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 5),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, pasteRow)
+	local clearButton = makeInstance("TextButton", {
+		Size = UDim2.new(0.35, 0, 1, 0),
+		LayoutOrder = 1,
+		BackgroundColor3 = COLORS.red,
+		Text = "CLEAR PASTED",
+		TextColor3 = COLORS.text,
+		TextSize = 9,
+		Font = Enum.Font.GothamBold,
+		BorderSizePixel = 0,
+		AutoButtonColor = true,
+	}, pasteRow)
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 6) }, clearButton)
+	ui.freezeButton = makeInstance("TextButton", {
+		Size = UDim2.new(0.61, 0, 1, 0),
+		LayoutOrder = 2,
+		BackgroundColor3 = COLORS.panel2,
+		Text = "FREEZE PASTED: ON",
+		TextColor3 = COLORS.text,
+		TextSize = 9,
+		Font = Enum.Font.GothamBold,
+		BorderSizePixel = 0,
+		AutoButtonColor = true,
+	}, pasteRow)
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 6) }, ui.freezeButton)
+	ui.resetButton = button("RESET CAPTURE", { height = 24, textSize = 9 })
+
+	section("TOOLS")
+	local toolRow = makeInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 26),
+		BackgroundTransparency = 1,
+		LayoutOrder = nextOrder(),
+	}, body)
+	makeInstance("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal,
+		Padding = UDim.new(0, 5),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, toolRow)
+	ui.speedButton = makeInstance("TextButton", {
+		Size = UDim2.new(0.48, 0, 1, 0),
+		LayoutOrder = 1,
+		BackgroundColor3 = COLORS.panel2,
+		Text = "SPEED: 16",
+		TextColor3 = COLORS.text,
+		TextSize = 9,
+		Font = Enum.Font.GothamBold,
+		BorderSizePixel = 0,
+		AutoButtonColor = true,
+	}, toolRow)
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 6) }, ui.speedButton)
+	ui.jetpackButton = makeInstance("TextButton", {
+		Size = UDim2.new(0.48, 0, 1, 0),
+		LayoutOrder = 2,
+		BackgroundColor3 = COLORS.panel2,
+		Text = "JETPACK: OFF",
+		TextColor3 = COLORS.text,
+		TextSize = 9,
+		Font = Enum.Font.GothamBold,
+		BorderSizePixel = 0,
+		AutoButtonColor = true,
+	}, toolRow)
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 6) }, ui.jetpackButton)
+
+	section("ACTIVITY")
+	local logFrame = makeInstance("Frame", {
+		Size = UDim2.new(1, 0, 0, 71),
+		BackgroundColor3 = COLORS.panel,
+		BorderSizePixel = 0,
+		LayoutOrder = nextOrder(),
+	}, body)
+	makeInstance("UICorner", { CornerRadius = UDim.new(0, 7) }, logFrame)
+	makeInstance("UIStroke", { Color = COLORS.stroke, Thickness = 1 }, logFrame)
+	makeInstance("UIListLayout", {
+		Padding = UDim.new(0, 2),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, logFrame)
+	makeInstance("UIPadding", {
+		PaddingLeft = UDim.new(0, 7),
+		PaddingRight = UDim.new(0, 6),
+		PaddingTop = UDim.new(0, 5),
+	}, logFrame)
+	ui.logFrame = logFrame
+
+	ui.unloadButton = button("UNLOAD SCRIPT", { color = COLORS.panel, height = 22, textSize = 9 })
+	ui.unloadButton.TextColor3 = COLORS.dim
+	ui.unloadButton.Text = "UNLOAD SCRIPT  ·  F2 hides UI"
+	makeInstance("UIStroke", { Color = COLORS.stroke, Thickness = 1 }, ui.unloadButton)
+
+	local scale = makeInstance("UIScale", { Scale = 1 }, main)
+	ui.scale = scale
+
+	-- ============================== LOG ==============================
+	local function addLog(text, tone)
+		local color = COLORS.dim
+		if tone == "ok" then color = COLORS.lime
+		elseif tone == "warn" then color = COLORS.amber
+		elseif tone == "error" then color = COLORS.red
+		elseif tone == "info" then color = COLORS.text
+		end
+		table.insert(notifyLines, { text = text, color = color, time = os.date("%H:%M:%S") })
+		while #notifyLines > 4 do table.remove(notifyLines, 1) end
+		for _, child in ipairs(logFrame:GetChildren()) do
+			if child:IsA("TextLabel") then child:Destroy() end
+		end
+		for index, line in ipairs(notifyLines) do
+			makeInstance("TextLabel", {
+				Size = UDim2.new(1, 0, 0, 15),
+				BackgroundTransparency = 1,
+				Text = ("%s  %s"):format(line.time, line.text),
+				TextColor3 = line.color,
+				TextSize = 9,
+				Font = Enum.Font.Code,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				LayoutOrder = index,
+			}, logFrame)
+		end
+	end
+	ui.addLog = addLog
+	notify = function(text, tone) addLog(text, tone) end
+
+	-- ============================ UPDATE ============================
+	local function update()
+		if state.unloaded then return end
+		local blueprint = state.blueprint
+		local plot = state.plotPinned
+		if plot and not plot.Parent then plot = nil end
+		if not plot then plot = blueprint and blueprint.plot end
+		if plot and plot.Parent then
+			local pinned = state.plotPinned and state.plotPinned == plot
+			ui.plotLabel.Text = ("%s%s · %.0f×%.0f"):format(
+				pinned and "PIN " or "",
+				plot.Name,
+				plot.Size.X,
+				plot.Size.Z
+			)
+			ui.plotLabel.TextColor3 = COLORS.text
+			ui.targetDot.BackgroundColor3 = COLORS.lime
+		else
+			ui.plotLabel.Text = "Set / scan your build plot"
+			ui.plotLabel.TextColor3 = COLORS.text
+			ui.targetDot.BackgroundColor3 = COLORS.amber
+		end
+
+		if blueprint and blueprint.sourceCount > 0 then
+			ui.layerLabel.Text = ("LAYER  %d / %d"):format(state.layerIndex, #blueprint.layers)
+			ui.scanButton.Text = ("SCANNED · %d PARTS"):format(blueprint.sourceCount)
+			ui.pasteHint.Text = ("%d parts · %d blocks · %d configs kept"):format(
+				blueprint.sourceCount, blueprint.partCount or #blueprint.payloads, blueprint.configCount
+			)
+		else
+			ui.layerLabel.Text = "LAYER  0 / 0"
+			ui.scanButton.Text = "1 · SCAN BUILD"
+			ui.pasteHint.Text = "Whole build · configs kept · no cropping"
+		end
+
+		ui.layerDown.BackgroundColor3 = state.blueprint and COLORS.panel2 or COLORS.panel
+		ui.layerUp.BackgroundColor3 = state.blueprint and COLORS.panel2 or COLORS.panel
+		ui.previewButton.Text = state.previewActive
+			and "HIDE GHOST PREVIEW"
+			or "PREVIEW · CURRENT LAYER"
+		ui.previewButton.BackgroundColor3 = state.previewActive and COLORS.blue or COLORS.panel2
+		ui.previewButton.TextColor3 = COLORS.text
+
+		if state.pasting then
+			ui.pasteButton.Text = "PASTING... TAP TO CANCEL"
+			ui.pasteButton.BackgroundColor3 = COLORS.amber
+			ui.pasteButton.TextColor3 = COLORS.darkText
+		elseif state.pastedFolder and state.pastedFolder.Parent then
+			ui.pasteButton.Text = "2 · SHOW ALL · PASTE AGAIN"
+			ui.pasteButton.BackgroundColor3 = COLORS.lime
+			ui.pasteButton.TextColor3 = COLORS.darkText
+		else
+			ui.pasteButton.Text = "2 · SHOW ALL · PASTE"
+			ui.pasteButton.BackgroundColor3 = COLORS.lime
+			ui.pasteButton.TextColor3 = COLORS.darkText
+		end
+
+		ui.freezeButton.Text = state.pastedFrozen
+			and "FREEZE PASTED: ON"
+			or "FREEZE PASTED: OFF"
+		ui.speedButton.Text = ("SPEED: %d"):format(state.fast and CONFIG.SPEED_FAST or CONFIG.SPEED_DEFAULT)
+		ui.jetpackButton.Text = state.jetpackEnabled and "JETPACK: ON" or "JETPACK: OFF"
+		ui.jetpackButton.BackgroundColor3 = state.jetpackEnabled and COLORS.blue or COLORS.panel2
+		ui.pinPlotButton.Text = state.plotPinned and "PIN" or "SET"
+		ui.pinPlotButton.TextColor3 = state.plotPinned and COLORS.blue or COLORS.lime
+	end
+	ui.update = update
+
+	-- ========================== INTERACTION =========================
+	ui.pinPlotButton.MouseButton1Click:Connect(function()
+		if state.unloaded then return end
+		pinPlotFromCharacter()
+	end)
+
+	ui.scanButton.MouseButton1Click:Connect(function()
+		if state.pasting then notify("Wait for the paste to finish.", "warn") return end
+		if state.scanning then return end
+		ui.scanButton.Text = "SCANNING..."
+		task.spawn(function()
+			local ok, errorMessage = pcall(captureBuild)
+			state.scanning = false
+			if not ok then
+				warn("[BuildMirror] capture failed:", errorMessage)
+				notify(("Scan failed: %s"):format(tostring(errorMessage)), "error")
+			end
+			update()
+			refreshUI()
+		end)
+	end)
+
+	ui.pasteButton.MouseButton1Click:Connect(function()
+		if state.pasting then
+			state.cancelPaste = true
+		else
+			task.spawn(function()
+				local ok, errorMessage = pcall(pasteAll)
+				if not ok then
+					warn("[BuildMirror] paste failed:", errorMessage)
+					if state.pastedFolder then
+						state.pastedFolder:Destroy()
+					end
+					state.pastedFolder = nil
+					state.pastedRoot = nil
+					state.pastedParts = {}
+					state.pasting = false
+					state.cancelPaste = false
+					applyRayFilter()
+					notify(("Paste failed: %s"):format(tostring(errorMessage)), "error")
+				end
+				refreshUI()
+			end)
+		end
+	end)
+
+	clearButton.MouseButton1Click:Connect(function()
+		if state.pasting then
+			state.cancelPaste = true
+			notify("Cancelling paste...", "warn")
+		else
+			clearPasted(false)
+		end
+	end)
+
+	ui.resetButton.MouseButton1Click:Connect(function()
+		if state.pasting then state.cancelPaste = true end
+		clearPreview()
+		state.blueprint = nil
+		state.layerIndex = 1
+		notify("Capture reset. Pasted parts were left in place.", "info")
+		update()
+	end)
+
+	ui.previewButton.MouseButton1Click:Connect(previewCurrentLayer)
+
+	ui.layerUp.MouseButton1Click:Connect(function()
+		local blueprint = state.blueprint
+		if not blueprint or #blueprint.layers == 0 then return end
+		state.layerIndex = math.min(#blueprint.layers, state.layerIndex + 1)
+		if state.previewActive then drawPreview(false) end
+		update()
+	end)
+
+	ui.layerDown.MouseButton1Click:Connect(function()
+		local blueprint = state.blueprint
+		if not blueprint or #blueprint.layers == 0 then return end
+		state.layerIndex = math.max(1, state.layerIndex - 1)
+		if state.previewActive then drawPreview(false) end
+		update()
+	end)
+
+	ui.freezeButton.MouseButton1Click:Connect(togglePasteFreeze)
+	ui.speedButton.MouseButton1Click:Connect(toggleSpeed)
+	ui.jetpackButton.MouseButton1Click:Connect(toggleJetpack)
+	ui.collapse.MouseButton1Click:Connect(function()
+		state.uiCollapsed = not state.uiCollapsed
+		ui.body.Visible = not state.uiCollapsed
+		ui.subtitle.Visible = not state.uiCollapsed
+		ui.main.Size = state.uiCollapsed and UDim2.fromOffset(254, 48) or UDim2.fromOffset(254, 574)
+		ui.collapse.Text = state.uiCollapsed and "+" or "_"
+	end)
+	ui.unloadButton.MouseButton1Click:Connect(function()
+		unload()
+	end)
+
+	-- Drag the header (works with mouse + touch).
+	local dragging, dragStart, startPosition = false, nil, nil
+	local function beginDrag(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPosition = ui.main.Position
+		end
+	end
+	ui.dragRegion.InputBegan:Connect(beginDrag)
+	addConnection(UserInputService.InputChanged:Connect(function(input)
+		if dragging and dragStart and startPosition
+			and (input.UserInputType == Enum.UserInputType.MouseMovement
+				or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			ui.main.Position = UDim2.new(
+				startPosition.X.Scale,
+				startPosition.X.Offset + delta.X,
+				startPosition.Y.Scale,
+				startPosition.Y.Offset + delta.Y
+			)
+		end
+	end))
+	addConnection(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end))
+
+	-- Scaling keeps the panel usable on phones and small Studio viewports.
+	local function updateScale()
+		local camera = workspace.CurrentCamera
+		local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+		local target = math.clamp(viewport.Y / 760, 0.72, 1.05)
+		ui.scale.Scale = target
+	end
+	addConnection(workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(updateScale))
+	if workspace.CurrentCamera then
+		addConnection(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale))
+	end
+	updateScale()
+	addLog("Ready. Press 1 · SCAN BUILD to capture.", "info")
+	addLog("Paste now fits the whole build and keeps block configs.", "info")
+	update()
+	return update
+end
+
+-- Forward declarations used by capture/paste handlers.
+function notify(text, tone)
+	if ui.addLog then
+		ui.addLog(text, tone)
+	end
+end
+
+function refreshUI()
+	if ui.update then ui.update() end
+end
+
+function unload()
+	if state.unloaded then return end
+	state.unloaded = true
+	state.cancelPaste = true
+	stopJetpackVisuals()
+	if state.previewFolder then state.previewFolder:Destroy() end
+	if state.pastedFolder then state.pastedFolder:Destroy() end
+	if hum and hum.Parent then hum.WalkSpeed = CONFIG.SPEED_DEFAULT end
+	for _, connection in ipairs(state.connections) do
+		pcall(function() connection:Disconnect() end)
+	end
+	if ui.screenGui then ui.screenGui:Destroy() end
+	state.jetpackEnabled = false
+	state.blueprint = nil
+	state.pastedParts = {}
+	state.pastedRoot = nil
+	state.pastedFolder = nil
+	state.plotPinned = nil
+	state.pastedFrozen = true
+end
+
+local updateUI = createUI()
+refreshUI = function() updateUI() end
+-- createUI assigns the real notify; make sure startup messages are visible.
+refreshUI()
+
+local uiVisible = true
+addConnection(UserInputService.InputBegan:Connect(function(input, processed)
+	if input.KeyCode == CONFIG.KEY_TOGGLE_UI then
+		uiVisible = not uiVisible
+		if ui.screenGui then ui.screenGui.Enabled = uiVisible end
+		return
+	end
+	if processed or state.unloaded then return end
+	if UserInputService:GetFocusedTextBox() then return end
+
+	if input.KeyCode == CONFIG.KEY_JETPACK then
+		toggleJetpack()
+		return
+	end
+	if not state.jetpackEnabled then return end
+	if input.KeyCode == CONFIG.KEY_UP then state.upPressed = true end
+	if input.KeyCode == CONFIG.KEY_DOWN then state.downPressed = true end
+end))
+
+addConnection(UserInputService.InputEnded:Connect(function(input)
+	if input.KeyCode == CONFIG.KEY_UP then state.upPressed = false end
+	if input.KeyCode == CONFIG.KEY_DOWN then state.downPressed = false end
+end))
+
+addConnection(RunService.Heartbeat:Connect(function(deltaTime)
+	if state.unloaded then return end
+	local ok, errorMessage = pcall(updateJetpack, deltaTime)
+	if not ok then
+		warn("[BuildMirror] jetpack update failed:", errorMessage)
+		state.jetpackEnabled = false
+		stopJetpackVisuals()
+		refreshUI()
+	end
+end))
+
+-- Refresh the target card occasionally so respawns / plot changes are noticed.
+task.spawn(function()
+	while not state.unloaded do
+		task.wait(1)
+		if not state.pasting and not state.blueprint then
+			refreshUI()
+		end
+	end
+end)
+
+print("[BuildMirror v2.1] loaded — whole-build paste, block configs preserved. SET pins your plot.")
