@@ -1,0 +1,2038 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace = workspace
+local LocalPlayer = Players.LocalPlayer
+
+local CONFIG = {
+	Radius = 2500,
+	MaxSpeed = 250,
+	MinPart = 0.1,
+	MaxPart = 25,
+	ObsDim = 64,
+	ActionDim = 10,
+	Hidden = 256,
+	Latent = 128,
+	Blocks = 3,
+	ActionEmbed = 64,
+	ValueBins = 51,
+	RewardBins = 51,
+	ValueMin = -300,
+	ValueMax = 300,
+	RewardMin = -2,
+	RewardMax = 2,
+	Gamma = 0.997,
+	Lr = 0.0012,
+	Momentum = 0.9,
+	WeightDecay = 0.00005,
+	ReplayCapacity = 5000,
+	BatchSize = 4,
+	SearchBudget = 6,
+	Candidates = 3,
+	DecideEvery = 0.2,
+	TrainEvery = 1.4,
+	WarmupSteps = 120,
+	ImitationLambda = 0.35,
+	MutateCooldown = 0.55,
+	ScanRadius = 190,
+	MaxNearby = 8,
+	LatentClamp = 8,
+	RewardClip = 2
+}
+
+local Commands = {
+	"Hover",
+	"Create",
+	"Recolor",
+	"Transparency",
+	"Material",
+	"Resize",
+	"Reflectance",
+	"Anchored",
+	"CanCollide",
+	"CastShadow",
+	"Behavior",
+	"Delete",
+	"Clear",
+	"Return"
+}
+
+local Materials = {
+	"SmoothPlastic",
+	"Neon",
+	"Metal",
+	"Glass",
+	"Wood",
+	"Marble",
+	"Grass",
+	"Ice",
+	"Concrete",
+	"ForceField",
+	"Fabric"
+}
+
+local Behaviors = {
+	"None",
+	"Spin",
+	"Pulse",
+	"Orbit",
+	"Bob",
+	"Dissolve"
+}
+
+local RNG = Random.new(os.clock() * 100000 + 2749)
+local EPS = 1e-8
+local PARAM_MODULES = {}
+local VALUE_SUPPORT = {}
+local REWARD_SUPPORT = {}
+
+for i = 1, CONFIG.ValueBins do
+	VALUE_SUPPORT[i] = CONFIG.ValueMin + (i - 1) * (CONFIG.ValueMax - CONFIG.ValueMin) / (CONFIG.ValueBins - 1)
+end
+for i = 1, CONFIG.RewardBins do
+	REWARD_SUPPORT[i] = CONFIG.RewardMin + (i - 1) * (CONFIG.RewardMax - CONFIG.RewardMin) / (CONFIG.RewardBins - 1)
+end
+
+local function zeros(n, value)
+	local out = table.create(n)
+	for i = 1, n do
+		out[i] = value or 0
+	end
+	return out
+end
+
+local function copyArray(source)
+	local out = table.create(#source)
+	for i = 1, #source do
+		out[i] = source[i]
+	end
+	return out
+end
+
+local function addArrays(a, b)
+	local out = table.create(#a)
+	for i = 1, #a do
+		out[i] = a[i] + b[i]
+	end
+	return out
+end
+
+local function clampArray(source, low, high)
+	local out = table.create(#source)
+	for i = 1, #source do
+		out[i] = math.clamp(source[i], low, high)
+	end
+	return out
+end
+
+local function normArray(source)
+	local total = 0
+	for i = 1, #source do
+		total += source[i] * source[i]
+	end
+	return math.sqrt(total + EPS)
+end
+
+local function softmax(logits)
+	local maxLogit = -math.huge
+	for i = 1, #logits do
+		if logits[i] > maxLogit then
+			maxLogit = logits[i]
+		end
+	end
+	local out = table.create(#logits)
+	local total = 0
+	for i = 1, #logits do
+		local value = math.exp(math.clamp(logits[i] - maxLogit, -60, 60))
+		out[i] = value
+		total += value
+	end
+	total = math.max(total, EPS)
+	for i = 1, #out do
+		out[i] /= total
+	end
+	return out
+end
+
+local function logSoftmax(logits)
+	local probs = softmax(logits)
+	local out = table.create(#logits)
+	for i = 1, #probs do
+		out[i] = math.log(math.max(probs[i], EPS))
+	end
+	return out
+end
+
+local function crossEntropy(logits, target)
+	local probs = softmax(logits)
+	local loss = 0
+	for i = 1, #logits do
+		if target[i] > 0 then
+			loss -= target[i] * math.log(math.max(probs[i], EPS))
+		end
+	end
+	return loss
+end
+
+local function crossEntropyGrad(logits, target)
+	local probs = softmax(logits)
+	local out = table.create(#logits)
+	for i = 1, #logits do
+		out[i] = probs[i] - target[i]
+	end
+	return out
+end
+
+local function twoHot(value, low, high, bins)
+	local target = zeros(bins)
+	local bounded = math.clamp(value, low, high)
+	local position = (bounded - low) / math.max(high - low, EPS) * (bins - 1) + 1
+	local lower = math.floor(position)
+	local upper = math.min(lower + 1, bins)
+	local fraction = position - lower
+	target[lower] += 1 - fraction
+	target[upper] += fraction
+	return target
+end
+
+local function expectation(logits, support)
+	local probs = softmax(logits)
+	local result = 0
+	for i = 1, #support do
+		result += probs[i] * support[i]
+	end
+	return result
+end
+
+local function normalSample()
+	local u1 = math.clamp(RNG:NextNumber(), 1e-7, 1 - 1e-7)
+	local u2 = math.clamp(RNG:NextNumber(), 1e-7, 1 - 1e-7)
+	return math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2)
+end
+
+local function gumbelSample()
+	local u = math.clamp(RNG:NextNumber(), 1e-7, 1 - 1e-7)
+	return -math.log(-math.log(u))
+end
+
+local function dotArrays(a, b)
+	local total = 0
+	for i = 1, #a do
+		total += a[i] * b[i]
+	end
+	return total
+end
+
+local function cosineGrad(prediction, target)
+	local predNorm = math.max(normArray(prediction), EPS)
+	local targetNorm = math.max(normArray(target), EPS)
+	local cosine = dotArrays(prediction, target) / (predNorm * targetNorm)
+	local out = table.create(#prediction)
+	for i = 1, #prediction do
+		out[i] = -(target[i] / (predNorm * targetNorm) - cosine * prediction[i] / (predNorm * predNorm)) / #prediction
+	end
+	return cosine, out
+end
+
+local Dense = {}
+Dense.__index = Dense
+
+local function newDense(inputSize, outputSize, scale)
+	local self = setmetatable({}, Dense)
+	self.inputSize = inputSize
+	self.outputSize = outputSize
+	self.W = table.create(outputSize)
+	self.gW = table.create(outputSize)
+	self.vW = table.create(outputSize)
+	self.b = zeros(outputSize)
+	self.gb = zeros(outputSize)
+	self.vb = zeros(outputSize)
+	local limit = math.sqrt(2 / math.max(inputSize, 1)) * (scale or 1)
+	for r = 1, outputSize do
+		local row = table.create(inputSize)
+		local grad = table.create(inputSize)
+		local velocity = table.create(inputSize)
+		for c = 1, inputSize do
+			row[c] = (RNG:NextNumber() * 2 - 1) * limit
+			grad[c] = 0
+			velocity[c] = 0
+		end
+		self.W[r] = row
+		self.gW[r] = grad
+		self.vW[r] = velocity
+	end
+	PARAM_MODULES[#PARAM_MODULES + 1] = self
+	return self
+end
+
+function Dense:forward(x)
+	self.cache = x
+	local y = table.create(self.outputSize)
+	for r = 1, self.outputSize do
+		local total = self.b[r]
+		local row = self.W[r]
+		for c = 1, self.inputSize do
+			total += row[c] * x[c]
+		end
+		y[r] = total
+	end
+	return y
+end
+
+function Dense:backward(dy)
+	local dx = zeros(self.inputSize)
+	for r = 1, self.outputSize do
+		local gradient = dy[r]
+		self.gb[r] += gradient
+		local row = self.W[r]
+		local gradRow = self.gW[r]
+		for c = 1, self.inputSize do
+			gradRow[c] += gradient * self.cache[c]
+			dx[c] += gradient * row[c]
+		end
+	end
+	return dx
+end
+
+function Dense:step(learningRate)
+	local lr = learningRate or CONFIG.Lr
+	for r = 1, self.outputSize do
+		local row = self.W[r]
+		local gradRow = self.gW[r]
+		local velRow = self.vW[r]
+		for c = 1, self.inputSize do
+			local g = math.clamp(gradRow[c], -5, 5) - CONFIG.WeightDecay * row[c]
+			velRow[c] = CONFIG.Momentum * velRow[c] - lr * g
+			row[c] += velRow[c]
+			gradRow[c] = 0
+		end
+		self.vb[r] = CONFIG.Momentum * self.vb[r] - lr * math.clamp(self.gb[r], -5, 5)
+		self.b[r] += self.vb[r]
+		self.gb[r] = 0
+	end
+end
+
+local LayerNorm = {}
+LayerNorm.__index = LayerNorm
+
+local function newLayerNorm(size)
+	local self = setmetatable({}, LayerNorm)
+	self.size = size
+	self.gamma = zeros(size, 1)
+	self.beta = zeros(size)
+	self.dGamma = zeros(size)
+	self.dBeta = zeros(size)
+	PARAM_MODULES[#PARAM_MODULES + 1] = self
+	return self
+end
+
+function LayerNorm:forward(x)
+	local n = #x
+	local mean = 0
+	for i = 1, n do
+		mean += x[i]
+	end
+	mean /= n
+	local variance = 0
+	for i = 1, n do
+		local diff = x[i] - mean
+		variance += diff * diff
+	end
+	variance /= n
+	local inverse = 1 / math.sqrt(variance + 1e-5)
+	local xhat = table.create(n)
+	local y = table.create(n)
+	for i = 1, n do
+		xhat[i] = (x[i] - mean) * inverse
+		y[i] = self.gamma[i] * xhat[i] + self.beta[i]
+	end
+	self.cacheXhat = xhat
+	self.cacheInverse = inverse
+	return y
+end
+
+function LayerNorm:backward(dy)
+	local n = #dy
+	local meanGradient = 0
+	local meanGradientXhat = 0
+	local scaled = table.create(n)
+	for i = 1, n do
+		local g = dy[i] * self.gamma[i]
+		scaled[i] = g
+		meanGradient += g
+		meanGradientXhat += g * self.cacheXhat[i]
+		self.dGamma[i] += dy[i] * self.cacheXhat[i]
+		self.dBeta[i] += dy[i]
+	end
+	meanGradient /= n
+	meanGradientXhat /= n
+	local dx = table.create(n)
+	for i = 1, n do
+		dx[i] = self.cacheInverse * (scaled[i] - meanGradient - self.cacheXhat[i] * meanGradientXhat)
+	end
+	return dx
+end
+
+function LayerNorm:step(learningRate)
+	local lr = learningRate or CONFIG.Lr
+	for i = 1, self.size do
+		self.gamma[i] = math.clamp(self.gamma[i] - lr * math.clamp(self.dGamma[i], -3, 3), 0.1, 4)
+		self.beta[i] -= lr * math.clamp(self.dBeta[i], -3, 3)
+		self.dGamma[i] = 0
+		self.dBeta[i] = 0
+	end
+end
+
+local ResBlock = {}
+ResBlock.__index = ResBlock
+
+local function newResBlock(size)
+	local self = setmetatable({}, ResBlock)
+	self.norm = newLayerNorm(size)
+	self.first = newDense(size, size)
+	self.second = newDense(size, size)
+	return self
+end
+
+function ResBlock:forward(x)
+	local h = self.norm:forward(x)
+	self.maskFirst = table.create(#h)
+	for i = 1, #h do
+		if h[i] < 0 then
+			h[i] = 0
+			self.maskFirst[i] = 0
+		else
+			self.maskFirst[i] = 1
+		end
+	end
+	h = self.first:forward(h)
+	self.maskSecond = table.create(#h)
+	for i = 1, #h do
+		if h[i] < 0 then
+			h[i] = 0
+			self.maskSecond[i] = 0
+		else
+			self.maskSecond[i] = 1
+		end
+	end
+	h = self.second:forward(h)
+	local out = table.create(#x)
+	for i = 1, #x do
+		out[i] = x[i] + h[i]
+	end
+	return out
+end
+
+function ResBlock:backward(dy)
+	local dSecond = self.second:backward(dy)
+	for i = 1, #dSecond do
+		dSecond[i] *= self.maskSecond[i]
+	end
+	local dFirst = self.first:backward(dSecond)
+	for i = 1, #dFirst do
+		dFirst[i] *= self.maskFirst[i]
+	end
+	local dNorm = self.norm:backward(dFirst)
+	local dx = table.create(#dy)
+	for i = 1, #dy do
+		dx[i] = dy[i] + dNorm[i]
+	end
+	return dx
+end
+
+local RunningNorm = {}
+RunningNorm.__index = RunningNorm
+
+local function newRunningNorm(size)
+	local self = setmetatable({}, RunningNorm)
+	self.size = size
+	self.mean = zeros(size)
+	self.variance = zeros(size, 1)
+	self.m2 = zeros(size)
+	self.count = 1
+	return self
+end
+
+function RunningNorm:forward(x)
+	self.count += 1
+	local out = table.create(#x)
+	self.inverse = table.create(#x)
+	for i = 1, #x do
+		local delta = x[i] - self.mean[i]
+		self.mean[i] += delta / self.count
+		self.m2[i] += delta * (x[i] - self.mean[i])
+		self.variance[i] = math.max(self.m2[i] / self.count, 1e-4)
+		self.inverse[i] = 1 / math.sqrt(self.variance[i] + 1e-5)
+		out[i] = math.clamp((x[i] - self.mean[i]) * self.inverse[i], -8, 8)
+	end
+	return out
+end
+
+function RunningNorm:backward(dy)
+	local dx = table.create(#dy)
+	for i = 1, #dy do
+		dx[i] = dy[i] * self.inverse[i]
+	end
+	return dx
+end
+
+local function newRepresentation()
+	local self = { name = "H" }
+	self.norm = newRunningNorm(CONFIG.ObsDim)
+	self.input = newDense(CONFIG.ObsDim, CONFIG.Hidden)
+	self.normStem = newLayerNorm(CONFIG.Hidden)
+	self.blocks = {}
+	for i = 1, CONFIG.Blocks do
+		self.blocks[i] = newResBlock(CONFIG.Hidden)
+	end
+	self.output = newDense(CONFIG.Hidden, CONFIG.Latent)
+	self.outputNorm = newLayerNorm(CONFIG.Latent)
+	function self:forward(observation)
+		local x = self.norm:forward(observation)
+		x = self.input:forward(x)
+		x = self.normStem:forward(x)
+		self.stem = table.create(#x)
+		for i = 1, #x do
+			self.stem[i] = math.tanh(x[i])
+			x[i] = self.stem[i]
+		end
+		for i = 1, #self.blocks do
+			x = self.blocks[i]:forward(x)
+		end
+		x = self.output:forward(x)
+		return self.outputNorm:forward(x)
+	end
+	function self:backward(dy)
+		local d = self.outputNorm:backward(dy)
+		d = self.output:backward(d)
+		for i = #self.blocks, 1, -1 do
+			d = self.blocks[i]:backward(d)
+		end
+		for i = 1, #d do
+			d[i] *= 1 - self.stem[i] * self.stem[i]
+		end
+		d = self.normStem:backward(d)
+		d = self.input:backward(d)
+		return self.norm:backward(d)
+	end
+	return self
+end
+
+local function newDynamics()
+	local self = { name = "G" }
+	self.actionNorm = newLayerNorm(CONFIG.ActionDim)
+	self.embedding = newDense(CONFIG.ActionDim, CONFIG.ActionEmbed)
+	self.embeddingNorm = newLayerNorm(CONFIG.ActionEmbed)
+	self.input = newDense(CONFIG.Latent + CONFIG.ActionEmbed, CONFIG.Hidden)
+	self.norm = newLayerNorm(CONFIG.Hidden)
+	self.block = newResBlock(CONFIG.Hidden)
+	self.output = newDense(CONFIG.Hidden, CONFIG.Latent)
+	self.outputNorm = newLayerNorm(CONFIG.Latent)
+	self.rewardHead = newDense(CONFIG.Hidden, CONFIG.RewardBins)
+	function self:forward(latent, action)
+		local a = self.actionNorm:forward(action)
+		a = self.embedding:forward(a)
+		a = self.embeddingNorm:forward(a)
+		self.actionMask = table.create(#a)
+		for i = 1, #a do
+			if a[i] < 0 then
+				a[i] = 0
+				self.actionMask[i] = 0
+			else
+				self.actionMask[i] = 1
+			end
+		end
+		local joined = table.create(CONFIG.Latent + CONFIG.ActionEmbed)
+		for i = 1, CONFIG.Latent do
+			joined[i] = latent[i]
+		end
+		for i = 1, CONFIG.ActionEmbed do
+			joined[CONFIG.Latent + i] = a[i]
+		end
+		local h = self.input:forward(joined)
+		h = self.norm:forward(h)
+		self.hiddenMask = table.create(#h)
+		for i = 1, #h do
+			if h[i] < 0 then
+				h[i] = 0
+				self.hiddenMask[i] = 0
+			else
+				self.hiddenMask[i] = 1
+			end
+		end
+		h = self.block:forward(h)
+		local reward = self.rewardHead:forward(h)
+		local nextLatent = self.output:forward(h)
+		nextLatent = self.outputNorm:forward(nextLatent)
+		nextLatent = clampArray(nextLatent, -CONFIG.LatentClamp, CONFIG.LatentClamp)
+		return nextLatent, reward
+	end
+	function self:backward(dNextLatent, dReward)
+		local dHidden = self.rewardHead:backward(dReward or zeros(CONFIG.RewardBins))
+		if dNextLatent then
+			local dOut = self.outputNorm:backward(dNextLatent)
+			dOut = self.output:backward(dOut)
+			for i = 1, #dHidden do
+				dHidden[i] += dOut[i]
+			end
+		end
+		dHidden = self.block:backward(dHidden)
+		for i = 1, #dHidden do
+			dHidden[i] *= self.hiddenMask[i]
+		end
+		local dJoined = self.norm:backward(dHidden)
+		dJoined = self.input:backward(dJoined)
+		local dLatent = table.create(CONFIG.Latent)
+		for i = 1, CONFIG.Latent do
+			dLatent[i] = dJoined[i]
+		end
+		local dActionEmbedded = table.create(CONFIG.ActionEmbed)
+		for i = 1, CONFIG.ActionEmbed do
+			dActionEmbedded[i] = dJoined[CONFIG.Latent + i]
+		end
+		local dEmbed = self.embeddingNorm:backward(dActionEmbedded)
+		for i = 1, #dEmbed do
+			dEmbed[i] *= self.actionMask[i]
+		end
+		dEmbed = self.embedding:backward(dEmbed)
+		local dAction = self.actionNorm:backward(dEmbed)
+		return dLatent, dAction
+	end
+	return self
+end
+
+local function newPrediction()
+	local self = { name = "P" }
+	self.trunk = newDense(CONFIG.Latent, CONFIG.Hidden)
+	self.trunkNorm = newLayerNorm(CONFIG.Hidden)
+	self.policyMean = newDense(CONFIG.Hidden, CONFIG.ActionDim)
+	self.policyLogStd = newDense(CONFIG.Hidden, CONFIG.ActionDim)
+	self.valueHead = newDense(CONFIG.Hidden, CONFIG.ValueBins)
+	self.commandHead = newDense(CONFIG.Hidden, #Commands)
+	for i = 1, CONFIG.ActionDim do
+		self.policyLogStd.b[i] = -0.8
+	end
+	function self:forward(latent)
+		local h = self.trunk:forward(latent)
+		h = self.trunkNorm:forward(h)
+		self.hiddenMask = table.create(#h)
+		for i = 1, #h do
+			if h[i] < 0 then
+				h[i] = 0
+				self.hiddenMask[i] = 0
+			else
+				self.hiddenMask[i] = 1
+			end
+		end
+		self.hidden = h
+		local mean = self.policyMean:forward(h)
+		local logStd = self.policyLogStd:forward(h)
+		local value = self.valueHead:forward(h)
+		local command = self.commandHead:forward(h)
+		return {
+			mean = clampArray(mean, -1, 1),
+			logStd = clampArray(logStd, -2.3, 1.2),
+			value = value,
+			command = command,
+			latent = latent
+		}
+	end
+	function self:backward(dMean, dLogStd, dValue, dCommand)
+		local dHidden = self.commandHead:backward(dCommand or zeros(#Commands))
+		local dValueHidden = self.valueHead:backward(dValue or zeros(CONFIG.ValueBins))
+		local dMeanHidden = self.policyMean:backward(dMean or zeros(CONFIG.ActionDim))
+		local dLogHidden = self.policyLogStd:backward(dLogStd or zeros(CONFIG.ActionDim))
+		for i = 1, #dHidden do
+			dHidden[i] += dValueHidden[i] + dMeanHidden[i] + dLogHidden[i]
+		end
+		for i = 1, #dHidden do
+			dHidden[i] *= self.hiddenMask[i]
+		end
+		local dLatent = self.trunkNorm:backward(dHidden)
+		return self.trunk:backward(dLatent)
+	end
+	return self
+end
+
+local Representation = newRepresentation()
+local Dynamics = newDynamics()
+local Prediction = newPrediction()
+local Projector = newProjector()
+local Predictor = newPredictor()
+local Camera = Workspace.CurrentCamera
+local STATE = {
+	position = Vector3.new(0, 70, 120),
+	velocity = Vector3.zero,
+	look = Vector3.new(0, 0, -1),
+	goal = Vector3.new(650, 35, -450),
+	origin = Vector3.zero,
+	lastAction = zeros(CONFIG.ActionDim, 0),
+	lastReward = 0,
+	lastDistance = 650,
+	lastMutation = 0,
+	speed = 0,
+	running = true,
+	manual = false,
+	steps = 0,
+	episode = 1,
+	training = false,
+	decisionClock = 0,
+	trainClock = 0,
+	mutations = 0,
+	stepsSinceMutation = 0,
+	loss = 1.842,
+	value = 0,
+	searchValue = 0,
+	lastPlan = nil,
+	imitationLambda = CONFIG.ImitationLambda,
+	behaviorClock = 0
+}
+
+local agentParts = setmetatable({}, { __mode = "k" })
+local createdParts = setmetatable({}, { __mode = "k" })
+local behaviorData = setmetatable({}, { __mode = "k" })
+local mutationHistory = {}
+local mutationSerial = 0
+
+local function safeUnit(vector)
+	if vector.Magnitude < 0.0001 then
+		return Vector3.zero
+	end
+	return vector.Unit
+end
+
+local function getOrigin()
+	local character = LocalPlayer.Character
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then
+		return root.Position
+	end
+	local spawn = Workspace:FindFirstChildOfClass("SpawnLocation")
+	if spawn then
+		return spawn.Position
+	end
+	return Vector3.new(0, 10, 0)
+end
+
+local function getRayParams()
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local character = LocalPlayer.Character
+	params.FilterDescendantsInstances = character and { character } or {}
+	params.RespectCanCollide = false
+	return params
+end
+
+local function castRay(direction, distance)
+	local camera = Workspace.CurrentCamera
+	if not camera then
+		return nil
+	end
+	return Workspace:Raycast(camera.CFrame.Position, safeUnit(direction) * distance, getRayParams())
+end
+
+local function getNearbyParts(radius)
+	local camera = Workspace.CurrentCamera
+	if not camera then
+		return {}
+	end
+	local overlap = OverlapParams.new()
+	overlap.FilterType = Enum.RaycastFilterType.Exclude
+	local character = LocalPlayer.Character
+	overlap.FilterDescendantsInstances = character and { character } or {}
+	local parts = Workspace:GetPartBoundsInRadius(STATE.position, radius, overlap)
+	table.sort(parts, function(a, b)
+		return (a.Position - STATE.position).Magnitude < (b.Position - STATE.position).Magnitude
+	end)
+	local out = {}
+	for i = 1, math.min(#parts, CONFIG.MaxNearby) do
+		out[i] = parts[i]
+	end
+	return out
+end
+
+local function senseWorld()
+	local character = LocalPlayer.Character
+	local camera = Workspace.CurrentCamera
+	local forward = STATE.look
+	local right = safeUnit(Vector3.new(forward.Z, 0, -forward.X))
+	if right.Magnitude < 0.01 then
+		right = Vector3.new(1, 0, 0)
+	end
+	local down = Vector3.new(0, -1, 0)
+	local forwardHit = castRay(forward, 280)
+	local rightHit = castRay(right, 180)
+	local downHit = castRay(down, 260)
+	local nearby = getNearbyParts(CONFIG.ScanRadius)
+	local aim = castRay(forward, 320)
+	local focus = nil
+	if aim and aim.Instance and aim.Instance:IsA("BasePart") then
+		focus = aim.Instance
+	elseif nearby[1] then
+		focus = nearby[1]
+	end
+	if character and focus and focus:IsDescendantOf(character) then
+		focus = nearby[2]
+	end
+	return {
+		focus = focus,
+		nearby = nearby,
+		aim = aim,
+		forwardHit = forwardHit,
+		rightHit = rightHit,
+		downHit = downHit,
+		right = right,
+		camera = camera
+	}
+end
+
+local function materialIndex(material)
+	for i = 1, #Materials do
+		if material == Enum.Material[Materials[i]] then
+			return i
+		end
+	end
+	return 1
+end
+
+local function behaviorIndex(name)
+	for i = 1, #Behaviors do
+		if Behaviors[i] == name then
+			return i
+		end
+	end
+	return 1
+end
+
+local function buildObservation(sensed, focusOverride)
+	local sense = sensed or senseWorld()
+	local focus = focusOverride or sense.focus
+	local origin = getOrigin()
+	local delta = STATE.position - origin
+	local goalDelta = STATE.goal - STATE.position
+	local distance = goalDelta.Magnitude
+	local direction = safeUnit(goalDelta)
+	local look = STATE.look
+	local velocity = STATE.velocity
+	local observation = {}
+	local function push(value)
+		if value ~= value then
+			value = 0
+		end
+		observation[#observation + 1] = math.clamp(value, -12, 12)
+	end
+	push(delta.X / CONFIG.Radius)
+	push(delta.Y / CONFIG.Radius)
+	push(delta.Z / CONFIG.Radius)
+	push(look.X)
+	push(look.Y)
+	push(look.Z)
+	push(velocity.X / CONFIG.MaxSpeed)
+	push(velocity.Y / CONFIG.MaxSpeed)
+	push(velocity.Z / CONFIG.MaxSpeed)
+	push(direction.X)
+	push(direction.Y)
+	push(direction.Z)
+	push(distance / CONFIG.Radius)
+	local rayA = sense.forwardHit and sense.forwardHit.Distance / 280 or 1
+	local rayB = sense.rightHit and sense.rightHit.Distance / 180 or 1
+	local rayC = sense.downHit and sense.downHit.Distance / 260 or 1
+	push(rayA)
+	push(rayB)
+	push(rayC)
+	local relative = focus and (focus.Position - STATE.position) or Vector3.zero
+	local size = focus and focus.Size or Vector3.zero
+	local color = focus and focus.Color or Color3.new(0, 0, 0)
+	local transparency = focus and focus.Transparency or 1
+	local reflectance = focus and focus.Reflectance or 0
+	local anchored = focus and focus.Anchored and 1 or 0
+	local collide = focus and focus.CanCollide and 1 or 0
+	local shadows = focus and focus.CastShadow and 1 or 0
+	local material = focus and focus.Material or Enum.Material.SmoothPlastic
+	local behavior = focus and focus:GetAttribute("EZV2_Behavior") or "None"
+	local orientation = focus and focus.Orientation or Vector3.zero
+	push(relative.X / CONFIG.ScanRadius)
+	push(relative.Y / CONFIG.ScanRadius)
+	push(relative.Z / CONFIG.ScanRadius)
+	push(size.X / CONFIG.MaxPart)
+	push(size.Y / CONFIG.MaxPart)
+	push(size.Z / CONFIG.MaxPart)
+	push(color.R)
+	push(color.G)
+	push(color.B)
+	push(transparency)
+	push(reflectance)
+	push(materialIndex(material) / #Materials)
+	push(orientation.X / 180)
+	push(orientation.Y / 180)
+	push(orientation.Z / 180)
+	push(anchored)
+	push(collide)
+	push(shadows)
+	push(behaviorIndex(behavior) / #Behaviors)
+	for i = 1, 8 do
+		push(STATE.lastAction[i] or 0)
+	end
+	push(STATE.speed / CONFIG.MaxSpeed)
+	push((delta.Magnitude <= CONFIG.Radius + 0.5) and 1 or 0)
+	push(math.clamp(delta.Y / 300, -1, 1))
+	push((os.clock() % 24) / 24)
+	push(math.clamp(STATE.stepsSinceMutation / 20, 0, 1))
+	for i = 1, CONFIG.MaxNearby do
+		local part = sense.nearby[i]
+		push(part and (part.Position - STATE.position).Magnitude / CONFIG.ScanRadius or 1)
+	end
+	push(#sense.nearby / CONFIG.MaxNearby)
+	push(math.abs(goalDelta.Y) / CONFIG.Radius)
+	push(STATE.manual and 1 or 0)
+	push(sense.aim and math.clamp(sense.aim.Distance / 320, 0, 1) or 1)
+	push(math.min(#agentParts, 64) / 64)
+	push(color.R * 0.5 + color.G * 0.3 + color.B * 0.2)
+	push(STATE.lastReward / CONFIG.RewardClip)
+	push(math.clamp((STATE.goal.Y - origin.Y) / CONFIG.Radius, -1, 1))
+	while #observation < CONFIG.ObsDim do
+		push(0)
+	end
+	while #observation > CONFIG.ObsDim do
+		table.remove(observation)
+	end
+	return observation, sense
+end
+
+local Search = {}
+
+function Search.plan(observation)
+	local latent = Representation:forward(observation)
+	local prior = Prediction:forward(latent)
+	local priorLog = logSoftmax(prior.command)
+	local scored = {}
+	for i = 1, #Commands do
+		scored[i] = { index = i, score = priorLog[i] + gumbelSample() }
+	end
+	table.sort(scored, function(a, b)
+		return a.score > b.score
+	end)
+	local candidateCount = math.min(CONFIG.Candidates, #Commands)
+	local candidates = {}
+	local mean = prior.mean
+	local sigma = {}
+	for i = 1, CONFIG.ActionDim do
+		sigma[i] = math.clamp(math.exp(prior.logStd[i]), 0.05, 2.2)
+	end
+	local simulations = math.max(1, math.floor(CONFIG.SearchBudget / candidateCount))
+	local sveSum = 0
+	local sveCount = 0
+	for c = 1, candidateCount do
+		local action = table.create(CONFIG.ActionDim)
+		local qSum = 0
+		local bestQ = -math.huge
+		local bestAction = nil
+		for s = 1, simulations do
+			for i = 1, CONFIG.ActionDim do
+				action[i] = math.clamp(mean[i] + sigma[i] * normalSample(), -1, 1)
+			end
+			action[6] = 1
+			local nextLatent, rewardLogits = Dynamics:forward(latent, action)
+			local prediction = Prediction:forward(nextLatent)
+			local immediate = expectation(rewardLogits, REWARD_SUPPORT)
+			local future = expectation(prediction.value, VALUE_SUPPORT)
+			local q = immediate + CONFIG.Gamma * future
+			qSum += q
+			sveSum += q
+			sveCount += 1
+			if q > bestQ then
+				bestQ = q
+				bestAction = copyArray(action)
+			end
+		end
+		candidates[c] = {
+			command = scored[c].index,
+			score = scored[c].score,
+			q = qSum / simulations,
+			action = bestAction
+		}
+	end
+	local sampledCandidates = copyArray(candidates)
+	while #candidates > 1 do
+		table.sort(candidates, function(a, b)
+			return a.q > b.q
+		end)
+		local keep = math.max(1, math.floor(#candidates / 2))
+		local survivors = {}
+		for i = 1, keep do
+			survivors[i] = candidates[i]
+		end
+		candidates = survivors
+	end
+	local best = candidates[1]
+	local improvedLogits = copyArray(prior.command)
+	for c = 1, #sampledCandidates do
+		local candidate = sampledCandidates[c]
+		improvedLogits[candidate.command] += math.clamp((candidate.q - best.q) * 2.4, -6, 6)
+	end
+	local probs = softmax(improvedLogits)
+	local action = copyArray(best.action or mean)
+	action[6] = 1
+	return {
+		action = action,
+		command = best.command,
+		commandProbs = probs,
+		value = best.q,
+		sve = sveSum / math.max(sveCount, 1),
+		searchValue = best.q,
+		priorValue = expectation(prior.value, VALUE_SUPPORT),
+		latent = latent
+	}
+end
+
+local function nextGoal()
+	local origin = getOrigin()
+	local angle = RNG:NextNumber() * math.pi * 2
+	local distance = 420 + RNG:NextNumber() * 900
+	local goal = origin + Vector3.new(math.cos(angle) * distance, 30 + RNG:NextNumber() * 90, math.sin(angle) * distance)
+	local delta = goal - origin
+	if delta.Magnitude > CONFIG.Radius - 120 then
+		goal = origin + delta.Unit * (CONFIG.Radius - 120)
+	end
+	STATE.goal = goal
+	STATE.lastDistance = (goal - STATE.position).Magnitude
+	return goal
+end
+
+local function clampToWorld(position)
+	local origin = getOrigin()
+	local relative = position - origin
+	if relative.Magnitude > CONFIG.Radius then
+		relative = relative.Unit * (CONFIG.Radius - 0.5)
+	end
+	local minimumHeight = origin.Y + 4
+	if origin.Y + relative.Y < minimumHeight then
+		relative += Vector3.new(0, minimumHeight - (origin.Y + relative.Y), 0)
+	end
+	return origin + relative
+end
+
+local function coerceValue(current, raw)
+	if raw == nil then
+		return nil
+	end
+	local kind = typeof(current)
+	if kind == "number" then
+		return tonumber(raw)
+	elseif kind == "boolean" then
+		if type(raw) == "string" then
+			return raw == "true" or raw == "1"
+		end
+		return not not raw
+	elseif kind == "string" then
+		return tostring(raw)
+	elseif kind == "Color3" then
+		if typeof(raw) == "Color3" then
+			return raw
+		elseif type(raw) == "table" then
+			return Color3.new(tonumber(raw[1]) or tonumber(raw.R) or 0, tonumber(raw[2]) or tonumber(raw.G) or 0, tonumber(raw[3]) or tonumber(raw.B) or 0)
+		elseif type(raw) == "string" then
+			local hex = raw:gsub("#", "")
+			if #hex == 6 then
+				return Color3.fromHex(hex)
+			end
+			local parts = string.split(raw, ",")
+			if #parts >= 3 then
+				return Color3.new(tonumber(parts[1]) or 0, tonumber(parts[2]) or 0, tonumber(parts[3]) or 0)
+			end
+		end
+		return nil
+	elseif kind == "Vector3" then
+		if typeof(raw) == "Vector3" then
+			return raw
+		elseif type(raw) == "table" then
+			return Vector3.new(tonumber(raw[1]) or tonumber(raw.X) or 0, tonumber(raw[2]) or tonumber(raw.Y) or 0, tonumber(raw[3]) or tonumber(raw.Z) or 0)
+		elseif type(raw) == "string" then
+			local parts = string.split(raw, ",")
+			if #parts >= 3 then
+				return Vector3.new(tonumber(parts[1]) or 0, tonumber(parts[2]) or 0, tonumber(parts[3]) or 0)
+			end
+		end
+		return nil
+	elseif kind == "Vector2" then
+		if typeof(raw) == "Vector2" then
+			return raw
+		elseif type(raw) == "table" then
+			return Vector2.new(tonumber(raw[1]) or 0, tonumber(raw[2]) or 0)
+		end
+		return nil
+	elseif kind == "CFrame" then
+		if typeof(raw) == "CFrame" then
+			return raw
+		elseif typeof(raw) == "Vector3" then
+			return CFrame.new(raw)
+		end
+		return nil
+	elseif kind == "EnumItem" then
+		local ok, enumType = pcall(function()
+			return current.EnumType
+		end)
+		if ok and enumType then
+			local candidate = enumType[tostring(raw)]
+			if candidate then
+				return candidate
+			end
+		end
+		return nil
+	end
+	return raw
+end
+
+local function setAnyProperty(instance, property, rawValue)
+	if not instance or property == nil then
+		return false, "missing instance or property"
+	end
+	local readOk, current = pcall(function()
+		return instance[property]
+	end)
+	if not readOk then
+		return false, "property could not be read"
+	end
+	local value = coerceValue(current, rawValue)
+	if value == nil then
+		return false, "value could not be coerced to " .. typeof(current)
+	end
+	local writeOk, err = pcall(function()
+		instance[property] = value
+	end)
+	if not writeOk then
+		return false, tostring(err)
+	end
+	return true, value
+end
+
+local function setBehavior(instance, behaviorName)
+	if not instance or not instance:IsA("BasePart") then
+		return false
+	end
+	local chosen = "None"
+	for i = 1, #Behaviors do
+		if Behaviors[i] == behaviorName then
+			chosen = behaviorName
+		end
+	end
+	if not behaviorData[instance] then
+		behaviorData[instance] = {
+			anchor = instance.Position,
+			baseRotation = instance.CFrame.Rotation,
+			baseTransparency = instance.Transparency,
+			baseSize = instance.Size,
+			phase = RNG:NextNumber() * math.pi * 2
+		}
+	end
+	behaviorData[instance].name = chosen
+	behaviorData[instance].baseTransparency = instance.Transparency
+	instance:SetAttribute("EZV2_Behavior", chosen)
+	agentParts[instance] = true
+	return true
+end
+
+local function createPart(position, options)
+	options = options or {}
+	local sizeX = math.clamp(tonumber(options.sizeX) or 8, CONFIG.MinPart, CONFIG.MaxPart)
+	local sizeY = math.clamp(tonumber(options.sizeY) or 8, CONFIG.MinPart, CONFIG.MaxPart)
+	local sizeZ = math.clamp(tonumber(options.sizeZ) or 8, CONFIG.MinPart, CONFIG.MaxPart)
+	local part = Instance.new("Part")
+	mutationSerial += 1
+	part.Name = "EZV2_Mutation_" .. string.format("%03d", mutationSerial)
+	part.Size = Vector3.new(sizeX, sizeY, sizeZ)
+	local target = Vector3.new(position.X, position.Y + sizeY * 0.5 + 0.05, position.Z)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CastShadow = true
+	part.Material = Enum.Material[options.material] or Enum.Material.SmoothPlastic
+	part.Transparency = math.clamp(tonumber(options.transparency) or 0.05, 0, 1)
+	part.Reflectance = math.clamp(tonumber(options.reflectance) or 0.04, 0, 1)
+	part.Color = typeof(options.color) == "Color3" and options.color or Color3.fromHSV(RNG:NextNumber(), 0.55, 0.92)
+	part.CFrame = CFrame.new(target) * CFrame.Angles(math.rad((RNG:NextNumber() - 0.5) * 16), RNG:NextNumber() * math.pi * 2, math.rad((RNG:NextNumber() - 0.5) * 12))
+	part:SetAttribute("EZV2_Owned", true)
+	part:SetAttribute("EZV2_Origin", "client-agent")
+	part:SetAttribute("EZV2_Behavior", options.behavior or "None")
+	part.Parent = Workspace
+	agentParts[part] = true
+	createdParts[part] = true
+	setBehavior(part, options.behavior or "None")
+	mutationHistory[#mutationHistory + 1] = part
+	if #mutationHistory > 160 then
+		table.remove(mutationHistory, 1)
+	end
+	STATE.mutations += 1
+	STATE.stepsSinceMutation = 0
+	return part
+end
+
+local function createFromAction(sensed, action)
+	local hit = sensed and sensed.aim
+	local point = hit and hit.Position or (STATE.position + STATE.look * 90)
+	local hue = (action[9] + 1) * 0.5
+	local sizeX = math.clamp(math.abs(action[8]) * 14 + 4, CONFIG.MinPart, CONFIG.MaxPart)
+	local sizeY = math.clamp(math.abs(action[7]) * 10 + 3, CONFIG.MinPart, CONFIG.MaxPart)
+	local sizeZ = math.clamp(math.abs(action[10]) * 12 + 4, CONFIG.MinPart, CONFIG.MaxPart)
+	local material = Materials[RNG:NextInteger(1, #Materials)]
+	local behavior = Behaviors[RNG:NextInteger(1, #Behaviors)]
+	return createPart(clampToWorld(point), {
+		sizeX = sizeX,
+		sizeY = sizeY,
+		sizeZ = sizeZ,
+		material = material,
+		behavior = behavior,
+		color = Color3.fromHSV(hue, 0.62, 0.95),
+		transparency = math.clamp(math.abs(action[7]) * 0.6, 0, 0.92)
+	})
+end
+
+local function findNextMaterial(material)
+	local current = materialIndex(material)
+	return Enum.Material[Materials[(current % #Materials) + 1]] or Enum.Material.SmoothPlastic
+end
+
+local function mutateFocus(commandIndex, action, sensed)
+	local command = Commands[commandIndex] or "Hover"
+	local focus = sensed and sensed.focus
+	if command == "Hover" then
+		return false, "hover"
+	elseif command == "Return" then
+		nextGoal()
+		return true, "goal changed"
+	elseif command == "Create" then
+		local part = createFromAction(sensed, action)
+		STATE.goal = part.Position
+		return true, "created " .. part.Name
+	elseif command == "Clear" then
+		local count = 0
+		local targets = {}
+		for part in pairs(createdParts) do
+			targets[#targets + 1] = part
+		end
+		for i = 1, #targets do
+			if targets[i] and targets[i].Parent then
+				targets[i]:Destroy()
+				count += 1
+			end
+		end
+		table.clear(createdParts)
+		table.clear(mutationHistory)
+		STATE.mutations += count
+		STATE.stepsSinceMutation = 0
+		return true, "cleared " .. count
+	end
+	if not focus or not focus.Parent then
+		return false, "no target"
+	end
+	if command == "Recolor" then
+		local hue = (action[9] + 1) * 0.5
+		focus.Color = Color3.fromHSV(hue, 0.62, 0.96)
+	elseif command == "Transparency" then
+		focus.Transparency = math.clamp(focus.Transparency + math.abs(action[7]) * 0.35, 0, 1)
+	elseif command == "Material" then
+		focus.Material = findNextMaterial(focus.Material)
+	elseif command == "Resize" then
+		focus.Size = Vector3.new(
+			math.clamp(focus.Size.X * (1 + action[8] * 0.25), CONFIG.MinPart, CONFIG.MaxPart),
+			math.clamp(focus.Size.Y * (1 + action[8] * 0.25), CONFIG.MinPart, CONFIG.MaxPart),
+			math.clamp(focus.Size.Z * (1 + action[8] * 0.25), CONFIG.MinPart, CONFIG.MaxPart)
+		)
+	elseif command == "Reflectance" then
+		focus.Reflectance = math.clamp(focus.Reflectance + action[10] * 0.2, 0, 1)
+	elseif command == "Anchored" then
+		focus.Anchored = not focus.Anchored
+	elseif command == "CanCollide" then
+		focus.CanCollide = not focus.CanCollide
+	elseif command == "CastShadow" then
+		focus.CastShadow = not focus.CastShadow
+	elseif command == "Behavior" then
+		local current = behaviorIndex(focus:GetAttribute("EZV2_Behavior") or "None")
+		setBehavior(focus, Behaviors[(current % #Behaviors) + 1])
+	elseif command == "Delete" then
+		createdParts[focus] = nil
+		behaviorData[focus] = nil
+		focus:Destroy()
+		STATE.mutations += 1
+		STATE.stepsSinceMutation = 0
+		return true, "deleted"
+	end
+	agentParts[focus] = true
+	STATE.mutations += 1
+	STATE.stepsSinceMutation = 0
+	return true, command
+end
+
+local function tickBehaviors(dt)
+	local now = os.clock()
+	for part, data in pairs(behaviorData) do
+		if not part.Parent then
+			behaviorData[part] = nil
+			agentParts[part] = nil
+		elseif data.name and data.name ~= "None" then
+			local elapsed = now + data.phase
+			if data.name == "Spin" then
+				part.CFrame = part.CFrame * CFrame.Angles(0, dt * 1.6, 0)
+			elseif data.name == "Pulse" then
+				part.Transparency = math.clamp(data.baseTransparency + (math.sin(elapsed * 2.4) * 0.5 + 0.5) * 0.55, 0, 0.96)
+			elseif data.name == "Orbit" then
+				local radius = math.max(data.baseSize.X * 0.45, 3)
+				local offset = Vector3.new(math.cos(elapsed * 1.4) * radius, math.sin(elapsed * 2.1) * radius * 0.25, math.sin(elapsed * 1.4) * radius)
+				part.CFrame = CFrame.new(data.anchor + offset) * data.baseRotation
+			elseif data.name == "Bob" then
+				part.CFrame = CFrame.new(data.anchor + Vector3.new(0, math.sin(elapsed * 1.8) * 4.5, 0)) * data.baseRotation
+			elseif data.name == "Dissolve" then
+				part.Transparency = math.clamp((math.sin(elapsed * 1.4) * 0.5 + 0.5) * 0.88, 0, 0.94)
+			end
+		end
+	end
+end
+local Replay = { items = {}, size = 0, head = 0 }
+
+function Replay.push(sample)
+	Replay.head = (Replay.head % CONFIG.ReplayCapacity) + 1
+	Replay.items[Replay.head] = sample
+	Replay.size = math.min(Replay.size + 1, CONFIG.ReplayCapacity)
+end
+
+function Replay.sample()
+	if Replay.size == 0 then
+		return nil
+	end
+	local index = RNG:NextInteger(1, Replay.size)
+	return Replay.items[index]
+end
+
+function Replay.ageAll()
+	for i = 1, #Replay.items do
+		local item = Replay.items[i]
+		if item then
+			item.age = math.min((item.age or 0) + 1, 100000)
+		end
+	end
+end
+
+local function wrapAngle(angle)
+	while angle > math.pi do
+		angle -= math.pi * 2
+	end
+	while angle < -math.pi do
+		angle += math.pi * 2
+	end
+	return angle
+end
+
+local function flatDistance(a, b)
+	return Vector2.new(a.X - b.X, a.Z - b.Z).Magnitude
+end
+
+local function expertPolicy(sensed)
+	local toGoal = STATE.goal - STATE.position
+	local horizontal = safeUnit(Vector3.new(toGoal.X, 0, toGoal.Z))
+	local vertical = math.clamp(toGoal.Y / 180, -1, 1)
+	local yawTarget = math.atan2(-toGoal.X, -toGoal.Z)
+	local yawCurrent = math.atan2(-STATE.look.X, -STATE.look.Z)
+	local pitchTarget = math.atan2(toGoal.Y, math.max(Vector2.new(toGoal.X, toGoal.Z).Magnitude, 0.001))
+	local pitchCurrent = math.asin(math.clamp(STATE.look.Y, -1, 1))
+	local action = {
+		math.clamp(horizontal.X + normalSample() * 0.08, -1, 1),
+		math.clamp(vertical + normalSample() * 0.05, -1, 1),
+		math.clamp(horizontal.Z + normalSample() * 0.08, -1, 1),
+		math.clamp(wrapAngle(yawTarget - yawCurrent) * 2.2 + normalSample() * 0.06, -1, 1),
+		math.clamp(wrapAngle(pitchTarget - pitchCurrent) * 2.2 + normalSample() * 0.05, -1, 1),
+		1,
+		math.clamp(math.sin(STATE.steps * 0.08) * 0.6 + 0.2, -1, 1),
+		math.clamp(math.cos(STATE.steps * 0.11) * 0.7, -1, 1),
+		math.clamp(math.sin(STATE.steps * 0.05), -1, 1),
+		math.clamp(math.cos(STATE.steps * 0.07), -1, 1)
+	}
+	local sequence = { "Create", "Recolor", "Material", "Transparency", "Resize", "Behavior", "Create", "Reflectance", "CanCollide", "CastShadow" }
+	local commandName = sequence[(math.floor(STATE.steps / 18) % #sequence) + 1]
+	local commandIndex = 1
+	for i = 1, #Commands do
+		if Commands[i] == commandName then
+			commandIndex = i
+		end
+	end
+	if sensed and not sensed.focus then
+		commandIndex = 2
+	end
+	return action, commandIndex
+end
+
+local function computeReward(sensed, previousDistance, nextDistance, mutationSucceeded)
+	local progress = math.clamp((previousDistance - nextDistance) / 24, -1, 1)
+	local reward = progress * 1.35
+	local origin = getOrigin()
+	local distanceFromOrigin = (STATE.position - origin).Magnitude
+	if distanceFromOrigin > CONFIG.Radius - 1 then
+		reward -= 0.9
+	end
+	if STATE.speed > CONFIG.MaxSpeed + 0.5 then
+		reward -= 0.8
+	end
+	if mutationSucceeded then
+		reward += 0.72
+	end
+	if sensed and sensed.focus then
+		reward += 0.025
+	end
+	if nextDistance < 16 then
+		reward += 1.2
+	end
+	if STATE.stepsSinceMutation > 34 then
+		reward -= 0.012
+	end
+	return math.clamp(reward, -CONFIG.RewardClip, CONFIG.RewardClip)
+end
+
+local function mixedValueTarget(sample)
+	local sve = math.clamp(sample.sve or 0, CONFIG.ValueMin, CONFIG.ValueMax)
+	local nstep = math.clamp(sample.nstep or sve, CONFIG.ValueMin, CONFIG.ValueMax)
+	local freshness = math.exp(-(sample.age or 0) / 35)
+	local reanalysisWeight = 0.25 + 0.75 * freshness
+	return math.clamp(nstep * (1 - reanalysisWeight) + sve * reanalysisWeight, CONFIG.ValueMin, CONFIG.ValueMax)
+end
+
+local function probabilityTarget(command, plan)
+	local target = zeros(#Commands)
+	if plan and plan.commandProbs then
+		for i = 1, #Commands do
+			target[i] = plan.commandProbs[i] or 0
+		end
+	else
+		target[command] = 1
+	end
+	return target
+end
+
+local function trainSample(sample, lambda)
+	local valueTarget = mixedValueTarget(sample)
+	local latent = Representation:forward(sample.obs)
+	local predicted = Prediction:forward(latent)
+	local valueLoss = crossEntropy(predicted.value, twoHot(valueTarget, CONFIG.ValueMin, CONFIG.ValueMax, CONFIG.ValueBins))
+	local valueGrad = crossEntropyGrad(predicted.value, twoHot(valueTarget, CONFIG.ValueMin, CONFIG.ValueMax, CONFIG.ValueBins))
+	local commandTarget = sample.commandTarget or probabilityTarget(sample.command)
+	local commandLoss = crossEntropy(predicted.command, commandTarget)
+	local commandGrad = crossEntropyGrad(predicted.command, commandTarget)
+	local predictedValue = expectation(predicted.value, VALUE_SUPPORT)
+	local advantage = math.clamp(valueTarget - predictedValue, -20, 20)
+	local sigma = {}
+	for i = 1, CONFIG.ActionDim do
+		sigma[i] = math.clamp(math.exp(predicted.logStd[i]), 0.05, 2.2)
+	end
+	local imitationWeight = sample.imitationWeight or 0.55
+	local behaviorGrad = lambda * imitationWeight
+	local reactiveGrad = 0.12 * math.tanh(advantage / 4)
+	local dMean = zeros(CONFIG.ActionDim)
+	local dLogStd = zeros(CONFIG.ActionDim)
+	local policyLoss = 0
+	for i = 1, CONFIG.ActionDim do
+		local expertAction = sample.expertAction and sample.expertAction[i] or sample.action[i]
+		local residual = (predicted.mean[i] - expertAction) / sigma[i]
+		policyLoss += 0.5 * residual * residual + predicted.logStd[i]
+		dMean[i] = residual / sigma[i] * (behaviorGrad + reactiveGrad)
+		dLogStd[i] = (1 - residual * residual) * (behaviorGrad * 0.25 + math.abs(reactiveGrad) * 0.05)
+	end
+	local dLatent = Prediction:backward(dMean, dLogStd, valueGrad, commandGrad)
+	Representation:backward(dLatent)
+	local nextLatent, rewardLogits = Dynamics:forward(latent, sample.action)
+	local rewardTarget = twoHot(sample.reward, CONFIG.RewardMin, CONFIG.RewardMax, CONFIG.RewardBins)
+	local rewardLoss = crossEntropy(rewardLogits, rewardTarget)
+	local rewardGrad = crossEntropyGrad(rewardLogits, rewardTarget)
+	Dynamics:backward(zeros(CONFIG.Latent), rewardGrad)
+	local projectedPredicted = Projector:forward(nextLatent)
+	local predictedProjection = Predictor:forward(projectedPredicted)
+	local realObservation = sample.nextObs or sample.obs
+	local realLatent = Representation:forward(realObservation)
+	local projectedReal = Projector:forward(realLatent)
+	local cosine, consistencyGrad = cosineGrad(predictedProjection, projectedReal)
+	Predictor:backward(consistencyGrad)
+	local consistencyLoss = 1 - cosine
+	local total = valueLoss + rewardLoss + policyLoss * 0.08 + commandLoss + consistencyLoss * 0.15
+	return total, {
+		value = valueLoss,
+		reward = rewardLoss,
+		policy = policyLoss,
+		command = commandLoss,
+		consistency = consistencyLoss,
+		advantage = advantage,
+		cosine = cosine
+	}
+end
+
+local function updateAllParameters(learningRate)
+	for i = 1, #PARAM_MODULES do
+		local module = PARAM_MODULES[i]
+		if module.step then
+			module:step(learningRate)
+		end
+	end
+end
+
+local function trainBatch()
+	if Replay.size < 2 or STATE.training then
+		return
+	end
+	STATE.training = true
+	Replay.ageAll()
+	local batch = math.min(CONFIG.BatchSize, Replay.size)
+	local totalLoss = 0
+	local lossParts = { value = 0, reward = 0, policy = 0, command = 0, consistency = 0 }
+	local valid = 0
+	for i = 1, batch do
+		local sample = Replay.sample()
+		if sample then
+			local ok, loss, metrics = pcall(trainSample, sample, STATE.imitationLambda)
+			if ok and metrics then
+				totalLoss += loss
+				valid += 1
+				for key, value in pairs(metrics) do
+					if lossParts[key] ~= nil then
+						lossParts[key] += value
+					end
+				end
+				STATE.searchValue = sample.sve or STATE.searchValue
+			elseif not ok then
+				STATE.lastError = tostring(loss)
+			end
+		end
+	end
+	if valid > 0 then
+		updateAllParameters(CONFIG.Lr)
+		STATE.loss = totalLoss / valid
+		for key in pairs(lossParts) do
+			lossParts[key] /= valid
+		end
+		STATE.lossParts = lossParts
+	end
+	STATE.training = false
+end
+
+local function setManualMode(enabled)
+	STATE.manual = enabled and true or false
+	local camera = Workspace.CurrentCamera
+	if not camera then
+		return STATE.manual
+	end
+	if STATE.manual then
+		camera.CameraType = Enum.CameraType.Custom
+		STATE.manualCamera = camera.CFrame
+		STATE.manualClock = 0
+	else
+		camera.CameraType = Enum.CameraType.Scriptable
+		local look = camera.CFrame.LookVector
+		STATE.look = look
+		STATE.pitch = math.asin(math.clamp(look.Y, -1, 1))
+		STATE.yaw = math.atan2(-look.X, -look.Z)
+	end
+	return STATE.manual
+end
+
+local function manualCapture(dt)
+	STATE.manualClock += dt
+	local camera = Workspace.CurrentCamera
+	if not camera then
+		return
+	end
+	if STATE.manualClock < 0.18 then
+		return
+	end
+	STATE.manualClock = 0
+	local previous = STATE.manualCamera or camera.CFrame
+	local delta = previous:ToObjectSpace(camera.CFrame)
+	local rx, ry = delta:ToOrientation()
+	local character = LocalPlayer.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local movement = humanoid and humanoid.MoveDirection or Vector3.zero
+	local moveX = math.clamp(movement.X, -1, 1)
+	local moveZ = math.clamp(movement.Z, -1, 1)
+	local action = {
+		moveX,
+		math.clamp((camera.CFrame.LookVector.Y + 0.05) * -2, -1, 1),
+		moveZ,
+		math.clamp(ry * 12, -1, 1),
+		math.clamp(rx * 12, -1, 1),
+		UserInputService:IsKeyDown(Enum.KeyCode.E) and 1 or 0,
+		0.4,
+		0.2,
+		0.5,
+		0.3
+	}
+	local observation = buildObservation()
+	local command = 1
+	if UserInputService:IsKeyDown(Enum.KeyCode.E) then
+		command = 2
+	elseif UserInputService:IsKeyDown(Enum.KeyCode.R) then
+		command = 3
+	end
+	local focus = senseWorld().focus
+	local distance = flatDistance(STATE.position, STATE.goal)
+	local reward = math.clamp((STATE.lastDistance - distance) / 24 * 1.1, -CONFIG.RewardClip, CONFIG.RewardClip)
+	Replay.push({
+		obs = observation,
+		nextObs = observation,
+		action = action,
+		expertAction = copyArray(action),
+		command = command,
+		commandTarget = probabilityTarget(command),
+		reward = reward,
+		sve = STATE.searchValue or 0,
+		nstep = STATE.searchValue or 0,
+		age = 0,
+		ageWeight = 1,
+		imitationWeight = 2.2,
+		manual = true,
+		focused = focus ~= nil
+	})
+	STATE.lastAction = copyArray(action)
+	STATE.lastDistance = distance
+	STATE.lastReward = reward
+	STATE.steps += 1
+	STATE.manualCamera = camera.CFrame
+end
+
+local function decide()
+	local observation, sensed = buildObservation()
+	local plan = Search.plan(observation)
+	local expertAction, expertCommand = expertPolicy(sensed)
+	local warming = STATE.steps < CONFIG.WarmupSteps
+	local exploration = RNG:NextNumber()
+	local selectedAction = nil
+	local selectedCommand = 1
+	if warming or exploration < 0.06 then
+		selectedAction = expertAction
+		selectedCommand = expertCommand
+	else
+		selectedAction = copyArray(plan.action)
+		selectedCommand = plan.command
+	end
+	selectedAction = clampArray(selectedAction, -1, 1)
+	if not STATE.manual and selectedAction[6] and selectedAction[6] > 0.4 and os.clock() - STATE.lastMutation > CONFIG.MutateCooldown then
+		STATE.lastMutation = os.clock()
+		local ok, detail = mutateFocus(selectedCommand, selectedAction, sensed)
+		STATE.lastMutationDetail = { ok = ok, detail = detail, command = Commands[selectedCommand], time = os.clock() }
+		STATE.mutationSucceeded = ok and true or false
+	else
+		STATE.mutationSucceeded = false
+	end
+	STATE.stepsSinceMutation += 1
+	local previousDistance = (STATE.goal - STATE.position).Magnitude
+	local desiredMotion = Vector3.new(selectedAction[1], selectedAction[2], selectedAction[3])
+	if desiredMotion.Magnitude > 1 then
+		desiredMotion = desiredMotion.Unit
+	end
+	STATE.desiredVelocity = desiredMotion * CONFIG.MaxSpeed
+	STATE.yawRate = selectedAction[4]
+	STATE.pitchRate = selectedAction[5]
+	STATE.lastAction = copyArray(selectedAction)
+	STATE.lastPlan = plan
+	STATE.searchValue = plan.value
+	STATE.steps += 1
+	STATE.pendingSample = {
+		obs = observation,
+		action = copyArray(selectedAction),
+		expertAction = expertAction,
+		command = selectedCommand,
+		commandTarget = probabilityTarget(selectedCommand, plan),
+		sve = plan.sve or plan.value,
+		nstep = math.clamp(plan.value + (STATE.lastReward or 0) * 0.35, CONFIG.ValueMin, CONFIG.ValueMax),
+		age = 0,
+		ageWeight = 1,
+		imitationWeight = warming and 2.8 or 0.65,
+		created = STATE.steps
+	}
+	STATE.pendingDistance = previousDistance
+	if previousDistance < 18 then
+		nextGoal()
+	end
+end
+
+local function finalizePending()
+	if not STATE.pendingSample then
+		return
+	end
+	local sample = STATE.pendingSample
+	local sensed = senseWorld()
+	local currentDistance = (STATE.goal - STATE.position).Magnitude
+	local reward = computeReward(sensed, STATE.pendingDistance or currentDistance, currentDistance, STATE.mutationSucceeded)
+	sample.reward = reward
+	sample.nextObs = buildObservation(sensed)
+	sample.focused = sensed.focus ~= nil
+	sample.done = false
+	Replay.push(sample)
+	STATE.lastReward = reward
+	STATE.lastDistance = currentDistance
+	STATE.pendingSample = nil
+end
+
+local function applyFlight(dt)
+	local camera = Workspace.CurrentCamera
+	if not camera then
+		return
+	end
+	Camera = camera
+	STATE.origin = getOrigin()
+	local desired = STATE.desiredVelocity or Vector3.zero
+	local response = math.clamp(dt * 7, 0, 1)
+	STATE.velocity += (desired - STATE.velocity) * response
+	local velocityMagnitude = STATE.velocity.Magnitude
+	if velocityMagnitude > CONFIG.MaxSpeed then
+		STATE.velocity = STATE.velocity.Unit * CONFIG.MaxSpeed
+		velocityMagnitude = CONFIG.MaxSpeed
+	end
+	STATE.speed = velocityMagnitude
+	STATE.position += STATE.velocity * dt
+	local relative = STATE.position - STATE.origin
+	if relative.Magnitude > CONFIG.Radius then
+		relative = relative.Unit * (CONFIG.Radius - 0.001)
+		STATE.position = STATE.origin + relative
+		STATE.velocity = STATE.velocity - relative.Unit * math.max(STATE.velocity:Dot(relative.Unit), 0)
+	end
+	local minimumY = STATE.origin.Y + 3
+	if STATE.position.Y < minimumY then
+		STATE.position = Vector3.new(STATE.position.X, minimumY, STATE.position.Z)
+		if STATE.velocity.Y < 0 then
+			STATE.velocity = Vector3.new(STATE.velocity.X, 0, STATE.velocity.Z)
+		end
+	end
+	STATE.yaw = (STATE.yaw or 0) + (STATE.yawRate or 0) * 1.8 * dt
+	STATE.pitch = math.clamp((STATE.pitch or 0) + (STATE.pitchRate or 0) * 1.3 * dt, -1.18, 1.18)
+	local cosPitch = math.cos(STATE.pitch)
+	local look = Vector3.new(-math.sin(STATE.yaw) * cosPitch, math.sin(STATE.pitch), -math.cos(STATE.yaw) * cosPitch)
+	STATE.look = look
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.CFrame = CFrame.lookAt(STATE.position, STATE.position + look, Vector3.yAxis)
+	camera.Focus = CFrame.new(STATE.position + look * 8)
+end
+local HUD = {
+	screen = nil,
+	status = nil,
+	detail = nil,
+	telemetry = nil,
+	clock = 0,
+	pauseButton = nil,
+	shadowButton = nil
+}
+
+local function makeLabel(parent, text, position, size, textSize, color, font)
+	local label = Instance.new("TextLabel")
+	label.BackgroundTransparency = 1
+	label.Position = position
+	label.Size = size
+	label.Font = font or Enum.Font.Code
+	label.Text = text
+	label.TextColor3 = color or Color3.fromRGB(180, 196, 170)
+	label.TextSize = textSize or 10
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.TextYAlignment = Enum.TextYAlignment.Center
+	label.Parent = parent
+	return label
+end
+
+local function makeButton(parent, text, position, size)
+	local button = Instance.new("TextButton")
+	button.Position = position
+	button.Size = size
+	button.BackgroundColor3 = Color3.fromRGB(22, 30, 21)
+	button.BackgroundTransparency = 0.08
+	button.BorderSizePixel = 0
+	button.TextColor3 = Color3.fromRGB(201, 247, 91)
+	button.Font = Enum.Font.Code
+	button.TextSize = 9
+	button.Text = text
+	button.AutoButtonColor = true
+	button.Parent = parent
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 4)
+	corner.Parent = button
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(71, 86, 62)
+	stroke.Thickness = 1
+	stroke.Transparency = 0.35
+	stroke.Parent = button
+	return button
+end
+
+local function buildHUD()
+	if HUD.screen then
+		return
+	end
+	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 12)
+	if not playerGui then
+		return
+	end
+	local screen = Instance.new("ScreenGui")
+	screen.Name = "EZV2_AgentHUD"
+	screen.ResetOnSpawn = false
+	screen.IgnoreGuiInset = true
+	screen.DisplayOrder = 30
+	screen.Parent = playerGui
+	HUD.screen = screen
+	local panel = Instance.new("Frame")
+	panel.Size = UDim2.fromOffset(260, 176)
+	panel.Position = UDim2.new(0, 18, 1, -18)
+	panel.AnchorPoint = Vector2.new(0, 1)
+	panel.BackgroundColor3 = Color3.fromRGB(12, 17, 12)
+	panel.BackgroundTransparency = 0.08
+	panel.BorderSizePixel = 0
+	panel.Parent = screen
+	local panelCorner = Instance.new("UICorner")
+	panelCorner.CornerRadius = UDim.new(0, 7)
+	panelCorner.Parent = panel
+	local panelStroke = Instance.new("UIStroke")
+	panelStroke.Color = Color3.fromRGB(51, 68, 45)
+	panelStroke.Thickness = 1
+	panelStroke.Transparency = 0.22
+	panelStroke.Parent = panel
+	local accent = Instance.new("Frame")
+	accent.Size = UDim2.new(1, 0, 0, 2)
+	accent.Position = UDim2.fromOffset(0, 0)
+	accent.BackgroundColor3 = Color3.fromRGB(201, 247, 91)
+	accent.BorderSizePixel = 0
+	accent.Parent = panel
+	local accentCorner = Instance.new("UICorner")
+	accentCorner.CornerRadius = UDim.new(0, 7)
+	accentCorner.Parent = accent
+	makeLabel(panel, "EZ-V2", UDim2.fromOffset(12, 10), UDim2.fromOffset(48, 18), 13, Color3.fromRGB(201, 247, 91), Enum.Font.Code)
+	makeLabel(panel, "CLIENT AGENT / LOCAL ONLY", UDim2.fromOffset(57, 10), UDim2.fromOffset(150, 18), 8, Color3.fromRGB(116, 132, 105), Enum.Font.Code)
+	HUD.pauseButton = makeButton(panel, "PAUSE", UDim2.fromOffset(12, 33), UDim2.fromOffset(54, 21))
+	HUD.shadowButton = makeButton(panel, "SHADOW", UDim2.fromOffset(70, 33), UDim2.fromOffset(58, 21))
+	makeButton(panel, "NEW GOAL", UDim2.fromOffset(132, 33), UDim2.fromOffset(58, 21))
+	makeButton(panel, "CLEAR", UDim2.fromOffset(194, 33), UDim2.fromOffset(54, 21))
+	HUD.status = makeLabel(panel, "BOOT / LATENT INITIALISE", UDim2.fromOffset(12, 61), UDim2.fromOffset(236, 13), 8.5, Color3.fromRGB(201, 247, 91), Enum.Font.Code)
+	HUD.detail = makeLabel(panel, "H 256 · latent 128 · 51 bins · bootstrapping", UDim2.fromOffset(12, 75), UDim2.fromOffset(236, 12), 8, Color3.fromRGB(151, 168, 140), Enum.Font.Code)
+	HUD.telemetry = makeLabel(panel, "AGENT 000, 000  ·  0.0 studs/s  ·  R 0.0", UDim2.fromOffset(12, 93), UDim2.fromOffset(236, 30), 8, Color3.fromRGB(189, 204, 178), Enum.Font.Code)
+	HUD.telemetry.TextYAlignment = Enum.TextYAlignment.Top
+	HUD.telemetry.TextWrapped = true
+	makeLabel(panel, "RIGHTSHIFT HIDE", UDim2.fromOffset(12, 154), UDim2.fromOffset(100, 12), 7, Color3.fromRGB(78, 93, 70), Enum.Font.Code)
+	makeLabel(panel, "WASD CAMERA IN SHADOW", UDim2.fromOffset(132, 154), UDim2.fromOffset(116, 12), 7, Color3.fromRGB(78, 93, 70), Enum.Font.Code)
+	HUD.pauseButton.MouseButton1Click:Connect(function()
+		STATE.running = not STATE.running
+		HUD.pauseButton.Text = STATE.running and "PAUSE" or "RESUME"
+	end)
+	HUD.shadowButton.MouseButton1Click:Connect(function()
+		setManualMode(not STATE.manual)
+		HUD.shadowButton.Text = STATE.manual and "RETURN" or "SHADOW"
+	end)
+	for _, child in ipairs(panel:GetChildren()) do
+		if child:IsA("TextButton") then
+			if child.Text == "NEW GOAL" then
+				child.MouseButton1Click:Connect(function()
+					nextGoal()
+				end)
+			elseif child.Text == "CLEAR" then
+				child.MouseButton1Click:Connect(function()
+					mutateFocus(13, zeros(CONFIG.ActionDim), senseWorld())
+				end)
+			end
+		end
+	end
+end
+
+local function refreshHUD(dt)
+	HUD.clock += dt
+	if HUD.clock < 0.18 or not HUD.status then
+		return
+	end
+	HUD.clock = 0
+	local origin = getOrigin()
+	local distance = flatDistance(STATE.position, origin)
+	local mode = "AUTONOMOUS"
+	if STATE.manual then
+		mode = "SHADOW / IMITATION"
+	elseif not STATE.running then
+		mode = "PAUSED"
+	elseif STATE.steps < CONFIG.WarmupSteps then
+		mode = "BOOTSTRAP / DEMO"
+	end
+	HUD.status.Text = string.format("%s · %s", mode, STATE.training and "GRADIENT" or "READY")
+	HUD.status.TextColor3 = STATE.lastError and Color3.fromRGB(255, 156, 156) or Color3.fromRGB(201, 247, 91)
+	HUD.detail.Text = string.format("step %d · loss %.3f · λ %.2f · edits %d", STATE.steps, STATE.loss or 0, STATE.imitationLambda, STATE.mutations)
+	HUD.telemetry.Text = string.format("AGENT %03d, %03d · %.1f studs/s\nRADIUS %.1f / %d · VALUE %+.2f\nCOMMAND %s · REPLAY %d", math.floor(STATE.position.X), math.floor(STATE.position.Z), STATE.speed, distance, CONFIG.Radius, STATE.searchValue or 0, STATE.lastMutationDetail and STATE.lastMutationDetail.command or "Hover", Replay.size)
+end
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed then
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.RightShift and HUD.screen then
+		HUD.screen.Enabled = not HUD.screen.Enabled
+	elseif input.KeyCode == Enum.KeyCode.G then
+		nextGoal()
+	end
+end)
+
+RunService.Heartbeat:Connect(function(dt)
+	tickBehaviors(dt)
+	if STATE.manual then
+		manualCapture(dt)
+	elseif STATE.running then
+		STATE.decisionClock += dt
+		if STATE.decisionClock >= CONFIG.DecideEvery then
+			STATE.decisionClock = 0
+			finalizePending()
+			local ok, err = pcall(decide)
+			if not ok then
+				STATE.lastError = tostring(err)
+			end
+		end
+		applyFlight(dt)
+	else
+		STATE.desiredVelocity = Vector3.zero
+		applyFlight(dt)
+	end
+	STATE.trainClock += dt
+	if STATE.trainClock >= CONFIG.TrainEvery and Replay.size >= 2 and not STATE.training and not STATE.manual then
+		STATE.trainClock = 0
+		local ok, err = pcall(trainBatch)
+		if not ok then
+			STATE.lastError = tostring(err)
+		end
+	end
+	refreshHUD(dt)
+end)
+
+task.spawn(function()
+	buildHUD()
+	local camera = Workspace.CurrentCamera
+	repeat
+		task.wait(0.1)
+		camera = Workspace.CurrentCamera
+	until camera ~= nil
+	Camera = camera
+	STATE.origin = getOrigin()
+	STATE.goal = nextGoal()
+	STATE.position = clampToWorld(STATE.origin + Vector3.new(0, 74, 120))
+	STATE.look = safeUnit(STATE.goal - STATE.position)
+	STATE.yaw = math.atan2(-STATE.look.X, -STATE.look.Z)
+	STATE.pitch = math.asin(math.clamp(STATE.look.Y, -1, 1))
+	STATE.lastDistance = (STATE.goal - STATE.position).Magnitude
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.CFrame = CFrame.lookAt(STATE.position, STATE.position + STATE.look)
+	applyFlight(0)
+end)
+
+LocalPlayer.CharacterAdded:Connect(function()
+	task.wait(0.6)
+	STATE.origin = getOrigin()
+	STATE.position = clampToWorld(STATE.origin + Vector3.new(0, 68, 100))
+	nextGoal()
+end)
+
+local function clearCreatedParts()
+	local count = 0
+	for part in pairs(createdParts) do
+		if part and part.Parent then
+			part:Destroy()
+			count += 1
+		end
+	end
+	table.clear(createdParts)
+	table.clear(mutationHistory)
+	return count
+end
+
+local API = {}
+_G.EfficientZeroV2 = API
+
+function API.SetProperty(instance, property, value)
+	return setAnyProperty(instance, property, value)
+end
+
+function API.SpawnPart(position, options)
+	return createPart(position or (STATE.position + STATE.look * 80), options)
+end
+
+function API.SetBehavior(instance, behaviorName)
+	return setBehavior(instance, behaviorName)
+end
+
+function API.Mutate(commandName, action)
+	local index = 1
+	for i = 1, #Commands do
+		if Commands[i] == commandName then
+			index = i
+		end
+	end
+	local useAction = action or STATE.lastAction
+	return mutateFocus(index, useAction, senseWorld())
+end
+
+function API.Retarget(position)
+	if typeof(position) == "Vector3" then
+		STATE.goal = clampToWorld(position)
+		STATE.lastDistance = (STATE.goal - STATE.position).Magnitude
+		return STATE.goal
+	end
+	return nextGoal()
+end
+
+function API.SetRunning(enabled)
+	STATE.running = enabled and true or false
+	return STATE.running
+end
+
+function API.SetShadow(enabled)
+	return setManualMode(enabled)
+end
+
+function API.SetImitationLambda(value)
+	STATE.imitationLambda = math.clamp(tonumber(value) or CONFIG.ImitationLambda, 0, 1)
+	return STATE.imitationLambda
+end
+
+function API.ClearCreated()
+	return clearCreatedParts()
+end
+
+function API.TrainNow()
+	trainBatch()
+	return STATE.loss
+end
+
+function API.Observe()
+	return buildObservation()
+end
+
+function API.Networks()
+	return {
+		representation = Representation,
+		dynamics = Dynamics,
+		prediction = Prediction,
+		projector = Projector,
+		predictor = Predictor
+	}
+end
+
+function API.Search(observation)
+	return Search.plan(observation or buildObservation())
+end
+
+function API.State()
+	return {
+		position = STATE.position,
+		velocity = STATE.velocity,
+		speed = STATE.speed,
+		goal = STATE.goal,
+		origin = getOrigin(),
+		radius = CONFIG.Radius,
+		maxSpeed = CONFIG.MaxSpeed,
+		steps = STATE.steps,
+		mutations = STATE.mutations,
+		loss = STATE.loss,
+		value = STATE.searchValue,
+		manual = STATE.manual,
+		running = STATE.running,
+		replay = Replay.size,
+		lambda = STATE.imitationLambda
+	}
+end
+
+function API.Config()
+	return CONFIG
+end
+
+function API.Commands()
+	return Commands
+end
